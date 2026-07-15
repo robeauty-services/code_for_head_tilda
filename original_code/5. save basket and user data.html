@@ -1,0 +1,497 @@
+<!-- save basket and user data -->
+<script>
+(function () {
+  var LS_KEY = 'user_purchase_info';
+  var TCART_KEY = 'tcart';
+  /** Основна корзина сайту (суфікс form…). */
+  var MAIN_CART_FORM_NUMID = '665507684';
+  /** Допродаж: сторінка з фрагментом у pathname; UTM ігноруються. */
+    var UPSELL_PAGE_PATH_SNIPPETS = ['/thanks', '/thx-claude'];
+  /** Форма окремої корзини допродажу (суфікс id="form…"). */
+    var UPSELL_CART_FORM_NUMID = '2235408313';
+  
+
+  /* ===== UTILS ===== */
+  function safeParse(s) {
+    try { return JSON.parse(s); } catch (e) { return null; }
+  }
+  function deepClone(o) {
+    if (!o || typeof o !== 'object') return null;
+    try { return JSON.parse(JSON.stringify(o)); } catch (e) { return null; }
+  }
+  function shallowExtend(target, src) {
+    if (!target) target = {};
+    if (src) {
+      for (var k in src) {
+        if (Object.prototype.hasOwnProperty.call(src, k)) target[k] = src[k];
+      }
+    }
+    return target;
+  }
+  function escName(name) {
+    return String(name || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  }
+
+  /* ===== STORAGE ===== */
+  function readBundle() {
+    var raw = safeParse(localStorage.getItem(LS_KEY));
+    return raw && typeof raw === 'object' ? raw : {};
+  }
+  function readTcart() {
+    return safeParse(localStorage.getItem(TCART_KEY));
+  }
+  function notifyUpdated() {
+    try { document.dispatchEvent(new CustomEvent('upi:user_purchase_updated')); } catch (e) {}
+  }
+  //   временная функция для тех у кого уже сохранено в локальном хранилище способ оплаты (добавлено 22.05.26)
+  function migrateRemovePaymentOption() {
+    try {
+      var b = readBundle();
+      if (b.user_info && 'payment_option' in b.user_info) {
+        delete b.user_info.payment_option;
+        localStorage.setItem(LS_KEY, JSON.stringify(b));
+      }
+    } catch (e) {}
+  }
+
+  /* ===== TRANSACTION ID =====
+     Беремо з dataLayer останній покупковий ID.
+     Формат від нашого GTM: "123456:0123456789".
+     Фолбек — tcart.orderid. */
+  function getGtmTransactionId() {
+    try {
+      var dl = window.dataLayer || [];
+      for (var i = dl.length - 1; i >= 0; i--) {
+        var x = dl[i];
+        if (!x || typeof x !== 'object') continue;
+        var eco = x.ecommerce;
+        var id =
+          (eco && eco.purchase && eco.purchase.actionField && eco.purchase.actionField.id) ||
+          (eco && eco.transaction_id) ||
+          (eco && eco.transactionId) ||
+          x.transaction_id ||
+          x.transactionId;
+        if (String(x.event || '').toLowerCase() === 'purchase' && eco && eco.transaction_id) {
+          id = eco.transaction_id;
+        }
+        if (id) return String(id);
+      }
+    } catch (e) {}
+    return '';
+  }
+  function buildOrderMeta(tcart) {
+    var txFull = getGtmTransactionId() || (tcart && tcart.orderid ? String(tcart.orderid) : '');
+    var orderIdVisible = '';
+    if (txFull) {
+      var parts = txFull.split('-');
+      orderIdVisible = parts.length > 1 ? parts[1] : parts[0];
+    }
+    return { transaction_id: txFull, order_id_visible: orderIdVisible };
+  }
+
+  /* ===== DOM ENRICHMENT =====
+     tcart не містить img/url, тому докручуємо їх з відкритої корзини
+     на момент aftersuccess: знаходимо рядок за SKU (в назві в [sku:…]). */
+  function extractSkuFromTitle(text) {
+    if (!text || typeof text !== 'string') return '';
+    var m = text.match(/\[sku:\s*([^\]]+)\]/i);
+    return m && m[1] ? String(m[1]).trim() : '';
+  }
+  function parseBgImageUrl(style) {
+    if (!style || typeof style !== 'string') return '';
+    var m = style.match(/background-image\s*:\s*url\s*\(\s*['"]?([^'")]+)/i);
+    return m && m[1] ? String(m[1]).replace(/^['"]|['"]$/g, '').trim() : '';
+  }
+  function extractRecid(href) {
+    if (!href || typeof href !== 'string') return '';
+    var m = href.match(/#rec(\d+)/i) || href.match(/[?&#]rec[=:/]?(\d+)/i);
+    return m && m[1] ? m[1] : '';
+  }
+  function collectMainCartDomRows() {
+    var box = document.querySelector('.t706__cartwin-products');
+    if (!box) return [];
+    var nodes = box.querySelectorAll('.t706__product');
+    var out = [];
+    for (var i = 0; i < nodes.length; i++) {
+      var row = nodes[i];
+      var a = row.querySelector('.t706__product-title a[href]');
+      var imgEl = row.querySelector('.t706__product-imgdiv');
+      var href = a ? (a.getAttribute('href') || '').trim() : '';
+      var title = a ? String(a.textContent || '').trim() : '';
+      var img = '';
+      if (imgEl) {
+        img = parseBgImageUrl(imgEl.getAttribute('style') || '');
+        if (!img) img = (imgEl.getAttribute('data-original') || '').trim();
+      }
+      out.push({ url: href, img: img, title: title, sku: extractSkuFromTitle(title) });
+    }
+    return out;
+  }
+  function mergeRow(product, dom) {
+    if (!product) return product;
+    var p = deepClone(product) || product;
+    if (!dom) return p;
+    if (dom.img) p.img = dom.img;
+    if (dom.url) {
+      p.url = dom.url;
+      var rid = extractRecid(dom.url);
+      if (rid) p.recid = rid;
+    }
+    if (dom.title && !p.name) p.name = dom.title;
+    return p;
+  }
+  function enrichProductsInfo(productsInfo) {
+    if (!productsInfo || !productsInfo.products || !productsInfo.products.length) return productsInfo;
+    var rows = collectMainCartDomRows();
+    if (!rows.length) return productsInfo;
+    var merged = deepClone(productsInfo);
+    if (!merged || !merged.products) return productsInfo;
+    var used = {};
+    for (var i = 0; i < merged.products.length; i++) {
+      var p = merged.products[i];
+      var sku = extractSkuFromTitle(p.name);
+      var idx = -1;
+      if (sku) {
+        for (var j = 0; j < rows.length; j++) {
+          if (!used[j] && rows[j].sku === sku) { idx = j; break; }
+        }
+      }
+      if (idx < 0) {
+        for (var k = 0; k < rows.length; k++) {
+          if (!used[k]) { idx = k; break; }
+        }
+      }
+      if (idx >= 0) {
+        used[idx] = true;
+        merged.products[i] = mergeRow(p, rows[idx]);
+      }
+    }
+    return merged;
+  }
+
+  /* ===== FORM READ ===== */
+  function getField(form, name) {
+    var sel = '[name="' + escName(name) + '"]';
+    var els = form.querySelectorAll(sel);
+    if (!els.length) return '';
+    var el = els[0];
+    if (el.type === 'radio') {
+      var c = form.querySelector(sel + ':checked');
+      return c ? (c.value || '').trim() : '';
+    }
+    if (el.type === 'checkbox') {
+      var out = [];
+      var boxes = form.querySelectorAll(sel + ':checked');
+      for (var i = 0; i < boxes.length; i++) out.push(boxes[i].value);
+      return out.join(', ');
+    }
+    return (el.value || '').trim();
+  }
+  function buildUserInfo(form) {
+    if (!form) return null;
+    var callOpt = getField(form, 'CallOption');
+    return {
+      name: getField(form, 'name'),
+      surname: getField(form, 'surname'),
+      city: getField(form, 'city'),
+      post_office: getField(form, 'address'),
+      email: getField(form, 'Email'),
+      phone: getField(form, 'phone'),
+      call_user: callOpt.indexOf('Передзвоніть') !== -1
+    //   payment_option: getField(form, 'paymentsystem') || 'cash'
+    };
+  }
+
+  /* ===== PERSIST =====
+     Запис відбувається лише після завершеного замовлення основної корзини. */
+  function saveOrder(userInfo, productsInfo, orderMeta) {
+    var prev = readBundle();
+    var hasLines = productsInfo && productsInfo.products && productsInfo.products.length > 0;
+
+    var next = {
+      user_info: shallowExtend(shallowExtend({}, prev.user_info || {}), userInfo || {}),
+      last_purchase: deepClone(prev.last_purchase) || null
+    };
+
+    if (hasLines) {
+      next.last_purchase = {
+        savedAt: new Date().getTime(),
+        products_info: productsInfo,
+        transaction_id: (orderMeta && orderMeta.transaction_id) || '',
+        order_id_visible: (orderMeta && orderMeta.order_id_visible) || ''
+      };
+      next.products_info = deepClone(productsInfo);
+    } else if (next.last_purchase && orderMeta) {
+      next.last_purchase.transaction_id = orderMeta.transaction_id || next.last_purchase.transaction_id || '';
+      next.last_purchase.order_id_visible = orderMeta.order_id_visible || next.last_purchase.order_id_visible || '';
+    }
+
+    localStorage.setItem(LS_KEY, JSON.stringify(next));
+    notifyUpdated();
+  }
+
+  function isMainForm(form) {
+    if (!form || form.tagName !== 'FORM') return false;
+    if (form.id === 'form' + MAIN_CART_FORM_NUMID) return true;
+    return false;
+  }
+  function mainForm() {
+    return document.getElementById('form' + MAIN_CART_FORM_NUMID);
+  }
+  function resolveForm(e, jqData) {
+    var d = e && e.detail && typeof e.detail === 'object' ? e.detail : {};
+    if (jqData && typeof jqData === 'object') d = shallowExtend(shallowExtend({}, d), jqData);
+    var fid = d.formId || d.formid || d.id || '';
+    if (fid) {
+      var byId = document.getElementById('form' + String(fid).replace(/^form/i, ''));
+      if (byId) return byId;
+    }
+    if (e && e.target && e.target.closest) {
+      var f = e.target.closest('form');
+      if (f) return f;
+    }
+    return mainForm();
+  }
+
+  function pathnameLc() {
+    try { return String(location.pathname || '').toLowerCase(); } catch (e) { return ''; }
+  }
+  function isThanksUpsellPage() {
+    var p = pathnameLc();
+    for (var i = 0; i < UPSELL_PAGE_PATH_SNIPPETS.length; i++) {
+      var frag = String(UPSELL_PAGE_PATH_SNIPPETS[i] || '').toLowerCase();
+      if (frag && p.indexOf(frag) !== -1) return true;
+    }
+    return false;
+  }
+  function isUpsellCartForm(form) {
+    if (!form || form.tagName !== 'FORM') return false;
+    return form.id === 'form' + UPSELL_CART_FORM_NUMID;
+  }
+
+  var _lastUpsellMergeAt = 0;
+  var _lastUpsellMergeSig = '';
+
+  /** Для допродажу — лише поточний tcart (останнє допзамовлення), без підмішування старих рядків. */
+  function snapshotUpsellCartOnly() {
+    var tc = deepClone(readTcart());
+    if (!tc || !tc.products || !tc.products.length) return null;
+    return enrichProductsInfo(tc);
+  }
+
+  function fingerprintProducts(products) {
+    if (!products || !products.length) return '';
+    var chunks = [];
+    for (var i = 0; i < products.length; i++) {
+      var p = products[i];
+      chunks.push(
+        String(p.name || '') +
+          '|' +
+          String(p.quantity != null ? p.quantity : 1) +
+          '|' +
+          String(p.amount != null ? p.amount : '') +
+          '|' +
+          String(p.price != null ? p.price : '')
+      );
+    }
+    return chunks.join('#');
+  }
+
+  /** Обʼєднати два products_info (рядики з addon додаються в хвіст), перерахувати суми та total. */
+  function mergeUpsellIntoBase(basePi, addonPi) {
+    var merged = deepClone(basePi);
+    if (!merged) merged = {};
+    var list =
+      merged.products && merged.products.length ? deepClone(merged.products) : [];
+    var add = addonPi && addonPi.products ? addonPi.products : [];
+    for (var i = 0; i < add.length; i++) {
+      var row = deepClone(add[i]);
+      if (row) list.push(row);
+    }
+    merged.products = list;
+
+    var t = 0;
+    var j;
+    for (j = 0; j < list.length; j++) {
+      var pr = list[j];
+      var q = pr.quantity != null ? Number(pr.quantity) : 1;
+      if (isNaN(q) || q < 1) q = 1;
+      var lineAmt = pr.amount != null ? Number(pr.amount) : NaN;
+      if (isNaN(lineAmt)) lineAmt = pr.price != null ? Number(pr.price) * q : 0;
+      if (isNaN(lineAmt)) lineAmt = 0;
+      t += lineAmt;
+    }
+    merged.prodamount = t;
+    merged.amount = t;
+    merged.total = list.length;
+    merged.updated = Math.floor(Date.now() / 1000);
+
+    if (addonPi) {
+      if (addonPi.currency) merged.currency = addonPi.currency;
+      if (addonPi.currency_txt) merged.currency_txt = addonPi.currency_txt;
+      if (addonPi.currency_txt_r) merged.currency_txt_r = addonPi.currency_txt_r;
+      if (addonPi.currency_txt_l) merged.currency_txt_l = addonPi.currency_txt_l;
+      if (addonPi.currency_sep) merged.currency_sep = addonPi.currency_sep;
+      if (addonPi.currency_dec != null) merged.currency_dec = addonPi.currency_dec;
+      if (addonPi.currency_side) merged.currency_side = addonPi.currency_side;
+      if (!merged.settings && addonPi.settings) merged.settings = addonPi.settings;
+    }
+
+    return merged;
+  }
+
+  /**
+   * Після успішного оформлення допродажу на pathname з /thanks.
+   * user_info, savedAt, transaction_id / order_id_visible не змінюються.
+   */
+  function flushUpsellAppend() {
+    var addon = snapshotUpsellCartOnly();
+    if (!addon || !addon.products || !addon.products.length) return;
+
+    var sig = fingerprintProducts(addon.products);
+    var now = Date.now();
+    if (sig && sig === _lastUpsellMergeSig && now - _lastUpsellMergeAt < 1200) {
+      return;
+    }
+    _lastUpsellMergeSig = sig || String(now);
+    _lastUpsellMergeAt = now;
+
+    var prev = readBundle();
+    var basePi = null;
+    if (prev.last_purchase && prev.last_purchase.products_info) {
+      basePi = deepClone(prev.last_purchase.products_info);
+    } else if (prev.products_info) {
+      basePi = deepClone(prev.products_info);
+    }
+
+    var mergedPi = mergeUpsellIntoBase(basePi || { products: [] }, addon);
+    if (!mergedPi || !mergedPi.products || !mergedPi.products.length) return;
+
+    var lpPrev = prev.last_purchase || {};
+    var savedAtKeep =
+      lpPrev.savedAt != null ? lpPrev.savedAt : new Date().getTime();
+
+    var next = {
+      user_info: shallowExtend({}, prev.user_info || {}),
+      last_purchase: {
+        savedAt: savedAtKeep,
+        products_info: mergedPi,
+        transaction_id: lpPrev.transaction_id != null ? String(lpPrev.transaction_id) : '',
+        order_id_visible: lpPrev.order_id_visible != null ? String(lpPrev.order_id_visible) : ''
+      },
+      products_info: deepClone(mergedPi)
+    };
+
+    localStorage.setItem(LS_KEY, JSON.stringify(next));
+    notifyUpdated();
+  }
+
+  function flushUpsellAppendChain() {
+    flushUpsellAppend();
+    setTimeout(flushUpsellAppend, 0);
+    setTimeout(flushUpsellAppend, 150);
+  }
+
+  /** Знімок корзини для products_info: спочатку tcart, інакше попередній запис (Tilda часто очищує tcart до/в момент колбека). */
+  function snapshotProductsInfo() {
+    var pi = deepClone(readTcart());
+    if (pi && pi.products && pi.products.length > 0) return enrichProductsInfo(pi);
+    var prev = readBundle();
+    if (prev.last_purchase && prev.last_purchase.products_info) {
+      pi = deepClone(prev.last_purchase.products_info);
+      if (pi && pi.products && pi.products.length > 0) return enrichProductsInfo(pi);
+    }
+    if (prev.products_info) {
+      pi = deepClone(prev.products_info);
+      if (pi && pi.products && pi.products.length > 0) return enrichProductsInfo(pi);
+    }
+    return null;
+  }
+
+  /** dataLayer / orderid у tcart зʼявляються після відправки форми — дописуємо ID кількома затримками. */
+  function scheduleTransactionIdPatches() {
+    var delays = [50, 250, 900, 2800];
+    for (var k = 0; k < delays.length; k++) {
+      (function (ms) {
+        setTimeout(function () {
+          try {
+            var b = readBundle();
+            var lp = b.last_purchase;
+            if (!lp) return;
+            var tc = readTcart();
+            var meta = buildOrderMeta(tc);
+            var tx = meta.transaction_id ? String(meta.transaction_id) : '';
+            if (!tx) return;
+            var vis = meta.order_id_visible ? String(meta.order_id_visible) : '';
+            var needTx = tx !== String(lp.transaction_id || '');
+            var needVis = !String(lp.order_id_visible || '') && !!(vis || tx.indexOf('-') >= 0);
+            if (!needTx && !needVis) return;
+            lp.transaction_id = tx;
+            if (vis) lp.order_id_visible = vis;
+            else if (!String(lp.order_id_visible || '') && tx.indexOf('-') >= 0) {
+              var p = tx.split('-');
+              lp.order_id_visible = p.length > 1 ? p[1] : p[0];
+            }
+            b.last_purchase = lp;
+            localStorage.setItem(LS_KEY, JSON.stringify(b));
+            notifyUpdated();
+          } catch (err) {}
+        }, ms);
+      })(delays[k]);
+    }
+  }
+
+  /** Один цикл збереження: user_info + знімок корзини + мета замовлення (з dataLayer / tcart.orderid). */
+  function flushOrderToStorage(form) {
+    var userInfo = buildUserInfo(form);
+    if (!userInfo) return;
+    var tc = readTcart();
+    var pi = snapshotProductsInfo();
+    saveOrder(userInfo, pi, buildOrderMeta(tc));
+  }
+
+  function onAfterSuccess(form) {
+    if (!form) return;
+
+    if (isUpsellCartForm(form)) {
+      if (isThanksUpsellPage()) {
+        flushUpsellAppendChain();
+      }
+      return;
+    }
+
+    if (!isMainForm(form)) {
+      return;
+    }
+
+    flushOrderToStorage(form);
+    setTimeout(function () {
+      flushOrderToStorage(form);
+    }, 0);
+    setTimeout(function () {
+      flushOrderToStorage(form);
+    }, 150);
+    scheduleTransactionIdPatches();
+  }
+
+  /* ===== WIRING ===== */
+  function bindJq() {
+    if (typeof window.jQuery === 'undefined') return;
+    window.jQuery(document).on('tildaform:aftersuccess tildaform:afterpaymentsuccess', function (_e, data) {
+      onAfterSuccess(resolveForm({ detail: data || {} }, data));
+    });
+  }
+  function init() {
+    migrateRemovePaymentOption(); // добавлено временно для пользователй у которых сохранена оплата (22.05.2026)
+    bindJq();
+    document.addEventListener('tildaform:aftersuccess', function (e) { onAfterSuccess(resolveForm(e)); });
+    document.addEventListener('tildaform:afterpaymentsuccess', function (e) { onAfterSuccess(resolveForm(e)); });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
+</script>
