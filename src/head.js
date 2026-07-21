@@ -30,49 +30,6 @@ document.addEventListener("DOMContentLoaded", function () {
   })();
 });
 
-/* ===================== 2. GrowthBook config (сам auto.min.js остаётся тегом в Tilda ПОСЛЕ head.js) ===================== */
-
-window.growthbook_config = window.growthbook_config || {};
-window.growthbook_config.trackingCallback = function (experiment, result) {
-  function getGaClientId() {
-    var m = document.cookie.match(/_ga=GA1\.\d+\.(\d+\.\d+)/);
-    if (m) return m[1];
-    // no _ga yet — mint one in GA's format and save it so later events reuse it
-    var cid =
-      Math.floor(Math.random() * 2147483647) +
-      "." +
-      Math.floor(Date.now() / 1000);
-    var domain = location.hostname.replace(/^www\./, "");
-    document.cookie =
-      "_ga=GA1.1." + cid + "; path=/; domain=." + domain + "; max-age=63072000";
-    return cid;
-  }
-  return fetch(
-    "https://payment-handler.site/fb_capi_service/api/google/experiment_viewed",
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      keepalive: true,
-      body: JSON.stringify({
-        client_id: getGaClientId(),
-        event_time: Math.floor(Date.now() / 1000),
-        event_source_url: window.location.href,
-        action_source: "website",
-        events: [
-          {
-            name: "experiment_viewed",
-            params: {
-              experiment_id: experiment.key,
-              variation_id: result.variationId,
-              gbuuid: result.hashValue,
-            },
-          },
-        ],
-      }),
-    },
-  ).catch(function () {});
-};
-
 /* ===================== 3. Facebook Pixel + CAPI ===================== */
 
 (function () {
