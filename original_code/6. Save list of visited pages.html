@@ -1,0 +1,100 @@
+<script>
+  /* ===================== 6. Visited pages -> webhook (product remarketing) ===================== */
+  /* Accumulates the pages a visitor viewed into a cookie, and pushes that list
+     into a hidden `visited_pages` field on the cart forms so it rides along in
+     the Tilda webhook. The backend matches it against product_mailing_rules:
+     viewed a product page but didn't buy -> added to a SendPulse book. */
+  (function () {
+    try {
+      var COOKIE = "rb_vp";
+      var FIELD = "visited_pages";
+      var MAX_PAGES = 50; // keep the cookie small
+      var TTL_DAYS = 30; // rolling window, matches remarketing intent
+      // Main cart + thank-you-page upsell cart (see section 5).
+      var CART_FORM_IDS = ["form665507684", "form2235408313"];
+
+      function readCookie() {
+        var m = document.cookie.match(/(?:^|;\s*)rb_vp=([^;]*)/);
+        if (!m) return [];
+        try {
+          return decodeURIComponent(m[1]).split("|").filter(Boolean);
+        } catch (e) {
+          return [];
+        }
+      }
+      function writeCookie(list) {
+        var d = new Date();
+        d.setDate(d.getDate() + TTL_DAYS);
+        document.cookie =
+          COOKIE +
+          "=" +
+          encodeURIComponent(list.join("|")) +
+          ";path=/;expires=" +
+          d.toUTCString() +
+          ";SameSite=Lax";
+      }
+      function currentPage() {
+        var host = "";
+        var path = "";
+        try {
+          host = location.host || "";
+        } catch (e) {}
+        try {
+          path = (location.pathname || "").replace(/\/+$/, "");
+        } catch (e) {}
+        return (host + path).toLowerCase();
+      }
+
+      // 1) Record the current page (deduped, capped). Runs on every page load.
+      var page = currentPage();
+      if (page) {
+        var pages = readCookie();
+        if (pages.indexOf(page) === -1) {
+          pages.push(page);
+          while (pages.length > MAX_PAGES) pages.shift();
+          writeCookie(pages);
+        }
+      }
+
+      // 2) Keep the hidden field on the cart forms in sync with the cookie, so
+      //    Tilda serializes it into the webhook when the form is submitted.
+      function ensureField() {
+        var value = readCookie().join("|");
+        for (var i = 0; i < CART_FORM_IDS.length; i++) {
+          var f = document.getElementById(CART_FORM_IDS[i]);
+          if (!f) continue;
+          var input = f.querySelector('input[name="' + FIELD + '"]');
+          if (!input) {
+            input = document.createElement("input");
+            input.type = "hidden";
+            input.name = FIELD;
+            f.appendChild(input);
+          }
+          input.value = value;
+        }
+      }
+
+      function start() {
+        ensureField();
+        // The cart form markup is (re)rendered when the cart opens; refresh then.
+        try {
+          var mo = new MutationObserver(function () {
+            ensureField();
+          });
+          mo.observe(document.body, {
+            attributes: true,
+            attributeFilter: ["class"],
+          });
+        } catch (e) {}
+        // Safety net for any dynamic re-render the observer misses.
+        setInterval(ensureField, 1000);
+      }
+
+      if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", start);
+      } else {
+        start();
+      }
+    } catch (e) {}
+  })();
+</script>
