@@ -230,15 +230,18 @@
     function buildUserInfo(form) {
       if (!form) return null;
       var callOpt = getField(form, "CallOption");
+      var cityEl = form.querySelector('[name="city"]');
+      var addrEl = form.querySelector('[name="address"]');
       return {
         name: getField(form, "name"),
         surname: getField(form, "surname"),
         city: getField(form, "city"),
+        city_ref: cityEl ? cityEl.getAttribute("data-ref") || "" : "",
         post_office: getField(form, "address"),
+        post_office_ref: addrEl ? addrEl.getAttribute("data-ref") || "" : "",
         email: getField(form, "Email"),
         phone: getField(form, "phone"),
         call_user: callOpt.indexOf("Передзвоніть") !== -1,
-        //   payment_option: getField(form, 'paymentsystem') || 'cash'
       };
     }
 
