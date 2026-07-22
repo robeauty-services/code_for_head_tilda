@@ -1757,7 +1757,7 @@ document.addEventListener("DOMContentLoaded", function () {
       );
   }
   function init() {
-    migrateRemovePaymentOption(); // добавлено временно для пользователй у которых сохранена оплата (22.05.2026)
+    // migrateRemovePaymentOption(); // добавлено временно для пользователй у которых сохранена оплата (22.05.2026)
     bindJq();
     document.addEventListener("tildaform:aftersuccess", function (e) {
       onAfterSuccess(resolveForm(e));
