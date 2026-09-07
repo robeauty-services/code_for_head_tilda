@@ -1618,14 +1618,14 @@
     y.parentNode.insertBefore(t, y);
   })(window, document, "clarity", "script", "xym8cht64o");
 </script>
-<!-- Cart product links -> Tilda webhook (order-confirmation email).
-     Paste into Manera site settings -> код в <head> (project 9787525).
+<!-- Cart product links to the Tilda webhook (order-confirmation email).
+     Goes in the Manera site head code, project 9787525.
      Robeauty has the same thing as section 7 of code_for_head_tilda/src/head.js.
 
      Why: Tilda's order webhook sends each product's name, image, price and
      quantity, but not its page URL — that only exists on window.tcart in the
      browser. The order email is built server-side from that webhook, so the
-     links ride along in a hidden `cart_products` field.
+     links ride along in a hidden cart_products field.
      Backend: robeauty-api/services/tilda-orders/src/order-email. -->
 <script>
   (function () {
