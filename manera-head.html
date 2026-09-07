@@ -1640,18 +1640,56 @@
         return m ? m[1] : "";
       }
 
-      // Only what the webhook lacks — name/img/price come from Tilda itself.
+      function skuFrom(text) {
+        var m = String(text || "").match(/sku:\s*([0-9A-Za-z-]+)/i);
+        return m ? m[1] : "";
+      }
+
+      /* Manera products are added through #order: links, not the Tilda store
+         catalog, so their cart entries carry no sku, no uid and no image —
+         Tilda ignores the :::image= suffix the buy links use. The buy links
+         are still in the DOM though, so read the images straight off them and
+         key by the sku each link declares. */
+      function imagesBySku() {
+        var map = {};
+        var links = document.querySelectorAll('a[href*="#order:"]');
+        for (var i = 0; i < links.length; i++) {
+          var href = "";
+          try {
+            href = decodeURIComponent(links[i].getAttribute("href") || "");
+          } catch (e) {
+            href = links[i].getAttribute("href") || "";
+          }
+          var sku = skuFrom(href);
+          if (!sku || map[sku]) continue;
+          var img = href.split(":::image=")[1];
+          if (img) map[sku] = img.split(":::")[0];
+        }
+        // Volume pickers keep their image on the option element itself.
+        var opts = document.querySelectorAll("[data-sku][data-img]");
+        for (var j = 0; j < opts.length; j++) {
+          var s = opts[j].getAttribute("data-sku");
+          if (s && !map[s]) map[s] = opts[j].getAttribute("data-img") || "";
+        }
+        return map;
+      }
+
+      // Only what the webhook lacks — name/price/quantity come from Tilda.
       function buildPayload() {
         var cart = window.tcart;
         if (!cart || !cart.products || !cart.products.length) return "";
         var pageUtm = utmFrom(window.location.href);
+        var images = imagesBySku();
         var items = [];
         for (var i = 0; i < cart.products.length; i++) {
           var p = cart.products[i] || {};
+          // #order: products carry their sku inside the name, nowhere else.
+          var sku = p.sku || skuFrom(p.name) || p.uid || "";
           items.push({
-            id: p.sku || p.uid || "",
+            id: sku,
             link: p.url || "",
-            utm: utmFrom(p.url) || pageUtm
+            utm: utmFrom(p.url) || pageUtm,
+            img: p.img || images[sku] || ""
           });
         }
         try {
