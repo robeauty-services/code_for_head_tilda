@@ -1872,3 +1872,85 @@ document.addEventListener("DOMContentLoaded", function () {
     }
   } catch (e) {}
 })();
+
+/* ===================== 7. Cart product links -> webhook (order email) ===================== */
+/* Tilda's order webhook carries a product's name, image, price and quantity,
+   but not its page URL — that only exists on `window.tcart.products[].url` in
+   the browser. The order-confirmation email is sent server-side from that
+   webhook (adblockers used to eat the /thanks fetch), so the missing links are
+   pushed into a hidden `cart_products` field on the cart forms, exactly like
+   `visited_pages` above. Backend: tilda-orders/src/order-email. */
+(function () {
+  try {
+    var FIELD = "cart_products";
+    // Main cart + thank-you-page upsell cart (see section 6).
+    var CART_FORM_IDS = ["form665507684", "form2235408313"];
+
+    function utmFrom(url) {
+      if (!url) return "";
+      var m = String(url).match(/[?&]utm_source=([^&#]+)/);
+      return m ? m[1] : "";
+    }
+
+    /* Only what the webhook lacks — name/img/price all come from Tilda itself,
+       so there is no point paying for them twice in a hidden field. */
+    function buildPayload() {
+      var cart = window.tcart;
+      if (!cart || !cart.products || !cart.products.length) return "";
+      var pageUtm = utmFrom(window.location.href);
+      var items = [];
+      for (var i = 0; i < cart.products.length; i++) {
+        var p = cart.products[i] || {};
+        items.push({
+          id: p.sku || p.uid || "",
+          link: p.url || "",
+          utm: utmFrom(p.url) || pageUtm,
+        });
+      }
+      try {
+        return JSON.stringify(items);
+      } catch (e) {
+        return "";
+      }
+    }
+
+    function ensureField() {
+      var value = buildPayload();
+      if (!value) return;
+      for (var i = 0; i < CART_FORM_IDS.length; i++) {
+        var f = document.getElementById(CART_FORM_IDS[i]);
+        if (!f) continue;
+        var input = f.querySelector('input[name="' + FIELD + '"]');
+        if (!input) {
+          input = document.createElement("input");
+          input.type = "hidden";
+          input.name = FIELD;
+          f.appendChild(input);
+        }
+        input.value = value;
+      }
+    }
+
+    function start() {
+      ensureField();
+      try {
+        var mo = new MutationObserver(function () {
+          ensureField();
+        });
+        mo.observe(document.body, {
+          attributes: true,
+          attributeFilter: ["class"],
+        });
+      } catch (e) {}
+      // The cart contents can change without a class flip; same safety net as
+      // section 6.
+      setInterval(ensureField, 1000);
+    }
+
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", start);
+    } else {
+      start();
+    }
+  } catch (e) {}
+})();
