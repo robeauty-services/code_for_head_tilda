@@ -1,0 +1,1166 @@
+/* Head script for pl.robeauty.me (Tilda project 6512256).
+
+   Built to dist/pl.min.js and loaded from jsDelivr by the site head code;
+   the inline part that has to stay in the head is in
+   tilda_head_without_scripts/tilda_pl_head.html.
+
+   Section numbers match src/head.js (robeauty.me) so the heads line up when
+   you diff them. PL has no sections 1, 2, 5, 6 or 7, and adds section 8,
+   which exists only here. */
+
+/* ===================== 3. Facebook Pixel + CAPI ===================== */
+
+(function () {
+  // =========================================================================
+  // 1. НАСТРОЙКИ И ИНИЦИАЛИЗАЦИЯ ПИКСЕЛЯ
+  // =========================================================================
+  var PIXEL_ID = "773583792158500";
+  var CAPI_URL = "https://payment-handler.site/fb_capi_service/api/fb_pl/";
+  var GOOGLE_URL =
+    "https://payment-handler.site/fb_capi_service/api/google_pl/";
+
+  !(function (f, b, e, v, n, t, s) {
+    if (f.fbq) return;
+    n = f.fbq = function () {
+      n.callMethod
+        ? n.callMethod.apply(n, arguments)
+        : n.queue.push(arguments);
+    };
+    if (!f._fbq) f._fbq = n;
+    n.push = n;
+    n.loaded = !0;
+    n.version = "2.0";
+    n.queue = [];
+    t = b.createElement(e);
+    t.async = !0;
+    t.src = v;
+    s = b.getElementsByTagName(e)[0];
+    s.parentNode.insertBefore(t, s);
+  })(
+    window,
+    document,
+    "script",
+    "https://connect.facebook.net/en_US/fbevents.js",
+  );
+
+  fbq("init", PIXEL_ID);
+
+  if (window.fbq && window.fbq._isIntercepted) return;
+  var originalFbq = window.fbq;
+
+  var map_content_ids = {
+    "00-00002469": "437876737532",
+    "00-00000220": "854789014822",
+    "00-00000219": "736046117162",
+    "00-00000009": "328084858892",
+    "00-00002495": "980421360802",
+    "00-00000002": "921172672902",
+    "00-00000007": "315174219592",
+    "00-00002496": "924594339702",
+    "00-00000003": "997028656252",
+    "00-00002497": "520216115272",
+    "00-00002561": "167256976932",
+    "00-00002181": "267488951102",
+    "00-00002184": "501752582612",
+    "00-00002182": "332255260002",
+    "00-00002185": "320874325882",
+    "00-00002040": "441958732372",
+    "00-00002063": "102869932952",
+    "00-00002011": "896271244172",
+    "00-00002542": "194577279682",
+    "00-00002541": "974052813942",
+    "00-00003113": "426213413782",
+    "00-00003086": "391823146112",
+    "00-00000008": "240332602604",
+    "00-00000120": "537457787724",
+    "00-00003484": "831647702554",
+  };
+  // =========================================================================
+  // 2. ГЛОБАЛЬНЫЕ ФУНКЦИИ-ПОМОЩНИКИ (HELPERS)
+  // =========================================================================
+
+  // Генератор ID
+  var generateEventId = (prefix) =>
+    `pl_${prefix}_${Math.floor(Date.now() / 1000)}_${Math.floor(Math.random() * 100000)}`;
+
+  var getCookie = (name) => {
+    var match = document.cookie.match(
+      new RegExp(
+        "(?:^|; )" +
+          name.replace(/([\.$?*|{}\(\)\[\]\\\/\+^])/g, "\\$1") +
+          "=([^;]*)",
+      ),
+    );
+    return match ? decodeURIComponent(match[1]) : null;
+  };
+
+  var getExternalId = (phone) => {
+    if (!phone) return undefined;
+    var digits = String(phone).replace(/\D/g, "");
+    //   return digits.length > 10 ? digits.slice(-10) : digits;
+    return digits; // для PL возвращаем весь номер
+  };
+
+  // Единая функция отправки на сервер CAPI
+  var sendToCapi = (endpoint, payload) => {
+    fetch(CAPI_URL + endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      keepalive: true,
+    }).catch((err) => console.error(`[CAPI Error - ${endpoint}]`, err));
+  };
+
+  var dispatchEvent = (method, eventName, params, options) => {
+    if (window.fbq.callMethod)
+      return window.fbq.callMethod.call(
+        window.fbq,
+        method,
+        eventName,
+        params,
+        options,
+      );
+    return originalFbq(method, eventName, params, options);
+  };
+
+  // Единый сборщик данных пользователя
+  var getUserDataFromStorage = () => {
+    var email = null,
+      phone = null;
+    try {
+      var udCart = JSON.parse(localStorage.getItem("user_data_cart") || "{}");
+      email = udCart.email || null;
+      phone = udCart.phone || null;
+
+      if (!email || !phone) {
+        var basket = JSON.parse(
+          localStorage.getItem("basket_data_with_date") || "{}",
+        );
+        if (!email) email = basket.email || null;
+        if (!phone) phone = basket.phone || null;
+      }
+    } catch (e) {
+      console.warn("[Storage Parse Error]", e);
+    }
+
+    return {
+      email,
+      phone,
+      fbc: getCookie("_fbc"),
+      fbp: getCookie("_fbp"),
+      client_user_agent: navigator.userAgent,
+    };
+  };
+
+  // Единый парсер корзины Тильды (устраняет дублирование кода для IC и Purchase)
+  var parseTildaCartData = (cartObj) => {
+    var result = {
+      content_ids: [],
+      contents: [],
+      ga_items: [],
+      num_items: 0,
+      value: Number(cartObj.prodamount) || 0,
+      currency: "PLN",
+    };
+    if (!cartObj || !cartObj.products) return result;
+
+    cartObj.products.forEach((elem) => {
+      if (elem.name === "empty" || elem.id === "delivery" || !elem.name)
+        return;
+
+      var id = elem.uid;
+      if (!id) {
+        var match = elem.name.match(/(?:\[sku:|\()([0-9-]+)(?:\]|\))/);
+        if (match && match[1]) id = map_content_ids[match[1]] || match[1];
+      }
+
+      if (id) {
+        var qty = Number(elem.quantity) || 1;
+        var itemPrice =
+          Number(elem.price) || (Number(elem.amount) || 0) / qty;
+
+        // Очищаем название для Google (отрезаем всё начиная с [sku: или =)
+        var cleanName = elem.name.split(/(?:\[sku:|\(|(?:=\d+$))/)[0].trim();
+
+        result.content_ids.push(String(id));
+        result.contents.push({
+          id: String(id),
+          quantity: qty,
+          item_price: itemPrice,
+        });
+
+        result.ga_items.push({
+          item_id: String(id),
+          item_name: cleanName,
+          currency: "PLN",
+          price: itemPrice,
+          quantity: qty,
+        });
+
+        result.num_items += qty;
+      }
+    });
+    return result;
+  };
+
+  // --- GOOGLE ХЕЛПЕР ---
+  var getGaClientId = () => {
+    var gaCookie = getCookie("_ga");
+    if (!gaCookie) return "unknown";
+    var parts = gaCookie.split(".");
+    return parts.length >= 4 ? parts.slice(2).join(".") : gaCookie;
+  };
+
+  var sendToGoogle = (endpoint, payload) => {
+    fetch(GOOGLE_URL + endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      keepalive: true,
+    }).catch((err) => console.error(`[Google Server Error]`, err));
+  };
+
+  // --- GOOGLE: view_item_list (каталог: season-sale или products?tfc…) ---
+  var shouldSendViewItemList = () => {
+    var u = window.location.href.toLowerCase();
+    if (u.indexOf("season-sale") !== -1) return true;
+    if (u.indexOf("tfc_storepartuid") !== -1) return true;
+
+    var path = window.location.pathname || "";
+    if (path === "/" || path === "") return true;
+
+    try {
+      if (
+        document.body &&
+        document.body.innerText.indexOf("Katalog produktów") !== -1
+      ) {
+        return true;
+      }
+    } catch (e) {}
+
+    return false;
+  };
+
+  // item_list_id: нижний регистр, пробелы и прочие разделители → «_» (Unicode-буквы сохраняем)
+  var formatListId = (name) => {
+    if (!name) return "sales";
+    return name
+      .trim()
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, "_")
+      .replace(/^_+|_+$/g, "");
+  };
+
+  /** Текущее выбранное имя списка (синхронизируется с .js-store-parts-switcher.t-active) */
+  var lastActiveListName = null;
+
+  var getViewItemListMetaFromDom = () => {
+    var listName = lastActiveListName;
+    if (!listName) {
+      return { item_list_id: "sales", item_list_name: "sales" };
+    }
+    return {
+      item_list_id: formatListId(listName),
+      item_list_name: listName,
+    };
+  };
+
+  /** Карточки витрины Tilda: data-product-uid / SKU / название / цена */
+  var collectStoreCardItemsForGa = () => {
+    var items = [];
+    var seen = {};
+    var cards = document.querySelectorAll(".js-product.t-store__card");
+    for (var i = 0; i < cards.length; i++) {
+      var card = cards[i];
+      var uid =
+        card.getAttribute("data-product-uid") ||
+        card.getAttribute("data-product-lid") ||
+        null;
+      var skuEl = card.querySelector(".js-store-prod-sku, .js-product-sku");
+      var skuRaw = skuEl ? skuEl.textContent : "";
+      var skuMatch = String(skuRaw).match(/00-[\d-]+/);
+      var sku = skuMatch ? skuMatch[0] : String(skuRaw).replace(/\s/g, "");
+
+      var itemId = uid;
+      if (!itemId && sku) {
+        itemId = map_content_ids[sku] || sku;
+      }
+      if (!itemId) continue;
+
+      var nameEl = card.querySelector(
+        ".js-store-prod-name, .js-product-name",
+      );
+      var itemName = nameEl ? nameEl.textContent.trim() : "Product";
+
+      var priceEl = card.querySelector(
+        ".js-product-price, .js-store-prod-price-val",
+      );
+      var price = 0;
+      if (priceEl) {
+        var def = priceEl.getAttribute("data-product-price-def");
+        if (def != null && def !== "") {
+          price = Number(def) || 0;
+        } else {
+          var num = String(priceEl.textContent)
+            .replace(/\s/g, "")
+            .replace(",", ".");
+          price = parseFloat(num) || 0;
+        }
+      }
+
+      var key = String(itemId);
+      if (seen[key]) continue;
+      seen[key] = true;
+      items.push({
+        item_id: String(itemId),
+        item_name: itemName,
+        currency: "PLN",
+        price: price,
+        quantity: 1,
+      });
+    }
+    return items;
+  };
+
+  var viewItemListDebounceTimer = null;
+  var sendViewItemListToGoogle = () => {
+    if (!shouldSendViewItemList()) return;
+    var listMeta = getViewItemListMetaFromDom();
+    var gaItems = collectStoreCardItemsForGa();
+    if (gaItems.length === 0) return;
+    var vilEventId = generateEventId("vil");
+
+    sendToGoogle("view_item_list", {
+      client_id: getGaClientId(),
+      event_id: vilEventId,
+      event_time: Math.floor(Date.now() / 1000),
+      event_source_url: window.location.href,
+      action_source: "website",
+      events: [
+        {
+          name: "view_item_list",
+          params: {
+            item_list_id: listMeta.item_list_id,
+            item_list_name: listMeta.item_list_name,
+            currency: "PLN",
+            items: gaItems,
+          },
+        },
+      ],
+    });
+  };
+
+  var scheduleViewItemList = () => {
+    if (viewItemListDebounceTimer) {
+      clearTimeout(viewItemListDebounceTimer);
+    }
+    viewItemListDebounceTimer = setTimeout(function () {
+      viewItemListDebounceTimer = null;
+      sendViewItemListToGoogle();
+    }, 450);
+  };
+
+  /** После любой смены классов перечитываем единственный .t-active (Tilda снимает/вешает класс на разных узлах) */
+  var categorySwitchClassDebounce = null;
+  var onStoreCategoryClassChanged = () => {
+    if (categorySwitchClassDebounce) {
+      clearTimeout(categorySwitchClassDebounce);
+    }
+    categorySwitchClassDebounce = setTimeout(function () {
+      categorySwitchClassDebounce = null;
+      if (!shouldSendViewItemList()) return;
+
+      var active = document.querySelector(
+        ".js-store-parts-switcher.t-active",
+      );
+      if (!active) return;
+
+      // Дефолт «Wszystkie» (без span) — не шлём view_item_list, сбрасываем state для следующего клика
+      if (active.classList.contains("t-store__parts-switch-btn-all")) {
+        lastActiveListName = null;
+        return;
+      }
+
+      var spanEl = active.querySelector(".t-store__parts-item-title");
+      var currentListName = spanEl ? spanEl.textContent.trim() : null;
+      if (!currentListName) return;
+      if (currentListName === lastActiveListName) return;
+
+      lastActiveListName = currentListName;
+      scheduleViewItemList();
+    }, 80);
+  };
+
+  /** Стартовое состояние: запоминаем активную вкладку без отправки (чтобы первый переход с «Season Sale» на «Kremy» сработал) */
+  var syncInitialStoreCategoryName = () => {
+    var active = document.querySelector(".js-store-parts-switcher.t-active");
+    if (
+      !active ||
+      active.classList.contains("t-store__parts-switch-btn-all")
+    ) {
+      lastActiveListName = null;
+      return;
+    }
+    var spanEl = active.querySelector(".t-store__parts-item-title");
+    lastActiveListName = spanEl ? spanEl.textContent.trim() : null;
+  };
+
+  /** Смена активной категории (дерево t-store__parts-switch-wrapper_tree) */
+  var setupViewItemListActiveObserver = () => {
+    if (!shouldSendViewItemList()) return;
+
+    var obs = new MutationObserver(function () {
+      onStoreCategoryClassChanged();
+    });
+
+    obs.observe(document.body, {
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["class"],
+    });
+  };
+  // =========================================================================
+  // 3. ПЕРЕХВАТЧИК PIXEL (INTERCEPTOR)
+  // =========================================================================
+  window.fbq = function (...args) {
+    var [method, eventName, data = {}] = args;
+
+    if (method === "track" && eventName === "AddToCart") {
+      var content_id = null;
+      if (data.content_ids) {
+        var rawId = Array.isArray(data.content_ids)
+          ? String(data.content_ids[0])
+          : String(data.content_ids);
+        var match = rawId.match(/(?:\[sku:|\()([0-9-]+)(?:\]|\))/);
+        content_id = /^\d+$/.test(rawId)
+          ? rawId
+          : match
+            ? map_content_ids[match[1]] || null
+            : null;
+      }
+
+      var itemValue = Number(data.value) || 0;
+      var eventId = generateEventId("atc");
+
+      sendToCapi("add_to_cart", {
+        event_name: "AddToCart",
+        event_time: Math.floor(Date.now() / 1000),
+        event_id: eventId,
+        event_source_url: window.location.href,
+        action_source: "website",
+        user_data: getUserDataFromStorage(),
+        custom_data: {
+          currency: "PLN",
+          value: itemValue,
+          content_type: "product",
+          content_ids: content_id ? [content_id] : [],
+          contents: content_id
+            ? [{ id: content_id, quantity: 1, item_price: itemValue }]
+            : [],
+        },
+      });
+
+      return dispatchEvent(
+        "track",
+        "AddToCart",
+        {
+          content_type: "product",
+          content_ids: content_id ? [content_id] : [],
+          contents: content_id
+            ? [{ id: content_id, quantity: 1, item_price: itemValue }]
+            : [],
+          value: itemValue,
+          currency: "PLN",
+        },
+        { eventID: eventId },
+      );
+    }
+
+    // Блокируем стандартный  InitiateCheckout, так как мы обрабатываем его сами через Vanilla JS
+    if (method === "track" && eventName === "InitiateCheckout") return;
+
+    if (window.fbq.callMethod)
+      return window.fbq.callMethod.apply(window.fbq, args);
+    return originalFbq.apply(this, args);
+  };
+
+  for (var prop in originalFbq) {
+    if (Object.prototype.hasOwnProperty.call(originalFbq, prop))
+      window.fbq[prop] = originalFbq[prop];
+  }
+  window.fbq._isIntercepted = true;
+
+  // =========================================================================
+  // 4. ОСНОВНЫЕ СОБЫТИЯ СТРАНИЦЫ (DOMContentLoaded)
+  // =========================================================================
+  document.addEventListener("DOMContentLoaded", () => {
+    var serverUserData = getUserDataFromStorage();
+
+    // --- PAGEVIEW ---
+    var pvEventId = generateEventId("pv");
+    dispatchEvent("track", "PageView", {}, { eventID: pvEventId });
+    sendToCapi("page_view", {
+      event_name: "PageView",
+      event_time: Math.floor(Date.now() / 1000),
+      event_id: pvEventId,
+      event_source_url: window.location.href,
+      action_source: "website",
+      user_data: serverUserData,
+    });
+
+    if (shouldSendViewItemList()) {
+      setTimeout(function () {
+        syncInitialStoreCategoryName();
+        setupViewItemListActiveObserver();
+      }, 800);
+    }
+
+    // --- VIEWCONTENT ---
+    var isProductPage = () => {
+      var url = window.location.href.toLowerCase();
+      if (window.location.pathname === "/" || window.location.pathname === "")
+        return false;
+      var excludes = [
+        "?tfc_storepartuid",
+        "about-us",
+        "test",
+        "season-sale",
+        "footer-dpd",
+        "head",
+        "thx-page",
+        "bestsellery",
+      ];
+      return !excludes.some((ex) => url.includes(ex));
+    };
+
+    if (isProductPage()) {
+      setTimeout(() => {
+        var id = null;
+        var price = 0;
+        var itemName = "Unknown Product";
+
+        var orderBtn = document.querySelector('a[href^="#order:"]');
+        if (orderBtn) {
+          var mainPart = orderBtn
+            .getAttribute("href")
+            .split("#order:")[1]
+            ?.split(":::")[0];
+          if (mainPart) {
+            var lastEq = mainPart.lastIndexOf("=");
+            if (lastEq !== -1)
+              price = Number(mainPart.substring(lastEq + 1)) || 0;
+
+            var match = mainPart.match(/(?:\[sku:|\()([0-9-]+)(?:\]|\))/);
+            var rawSku = match && match[1] ? match[1] : null;
+            if (rawSku) id = map_content_ids[rawSku] || rawSku;
+
+            var extractedName = mainPart.split(/(?:\[sku:|\()/)[0].trim();
+            if (extractedName) itemName = extractedName;
+          }
+        }
+
+        // вариант для лендов с новым типом добавления в корзину
+        if (!id) {
+          var container766 = document.querySelector(".t766__container");
+          if (container766) {
+            // Имя
+            var nameEl = container766.querySelector(".js-product-name");
+            if (nameEl) itemName = nameEl.textContent.trim();
+
+            // SKU + Маппинг
+            var skuEl = container766.querySelector(".js-product-sku");
+            if (skuEl) {
+              var rawSku2 = skuEl.textContent.trim();
+              id = map_content_ids[rawSku2] || rawSku2;
+            }
+
+            // Цена (приоритет у атрибута data-product-price-def, запасной вариант - очистка текста)
+            var priceEl = container766.querySelector(".js-product-price");
+            if (priceEl) {
+              var defPrice = priceEl.getAttribute("data-product-price-def");
+              if (defPrice) {
+                price = Number(defPrice) || 0;
+              } else {
+                price =
+                  parseFloat(
+                    priceEl.textContent.replace(/\s/g, "").replace(",", "."),
+                  ) || 0;
+              }
+            }
+          }
+        }
+
+        var contentIds = id ? [String(id)] : [];
+        var vcEventId = generateEventId("vc");
+
+        dispatchEvent(
+          "track",
+          "ViewContent",
+          {
+            content_type: "product",
+            content_ids: contentIds,
+            value: price,
+            currency: "PLN",
+          },
+          { eventID: vcEventId },
+        );
+
+        sendToCapi("view_content", {
+          event_name: "ViewContent",
+          event_time: Math.floor(Date.now() / 1000),
+          event_id: vcEventId,
+          event_source_url: window.location.href, // Не забудьте здесь (и ниже) использовать getCurrentUrl() если функция добавлена!
+          action_source: "website",
+          user_data: serverUserData,
+          custom_data: {
+            currency: "PLN",
+            value: price,
+            content_type: "product",
+            content_ids: contentIds,
+          },
+        });
+
+        // --- Отправка Google view_item ---
+        var gViEventId = generateEventId("gvi");
+        sendToGoogle("view_item", {
+          client_id: getGaClientId(),
+          event_id: gViEventId,
+          event_time: Math.floor(Date.now() / 1000),
+          event_source_url: window.location.href,
+          action_source: "website",
+          events: [
+            {
+              name: "view_item",
+              params: {
+                currency: "PLN",
+                value: price,
+                items: [
+                  {
+                    item_id: String(id), // Отправится "null", если товар не найден (соответствует fallback-логике)
+                    item_name: itemName,
+                    currency: "PLN",
+                    price: price,
+                    quantity: 1,
+                  },
+                ],
+              },
+            },
+          ],
+        });
+      }, 500);
+    }
+
+    // --- INITIATE CHECKOUT (Focus Event) ---
+    var handleCheckoutFocus = (e) => {
+      if (localStorage.getItem("fb_capi_initial_checkout") === "true") return;
+      if (e.target.closest(".t706__orderform")) {
+        try {
+          var cart = JSON.parse(localStorage.getItem("tcart") || "{}");
+          if (!cart.products || cart.products.length === 0) return;
+
+          localStorage.setItem("fb_capi_initial_checkout", "true");
+          document.removeEventListener("focusin", handleCheckoutFocus);
+
+          var parsedCart = parseTildaCartData(cart);
+          if (parsedCart.content_ids.length === 0) {
+            localStorage.removeItem("fb_capi_initial_checkout");
+            return;
+          }
+
+          var icEventId = generateEventId("ic");
+          var payload = {
+            content_type: "product",
+            content_ids: parsedCart.content_ids,
+            contents: parsedCart.contents,
+            value: parsedCart.value,
+            currency: parsedCart.currency,
+            num_items: parsedCart.num_items,
+          };
+
+          dispatchEvent("track", "InitiateCheckout", payload, {
+            eventID: icEventId,
+          });
+          sendToCapi("initiate_checkout", {
+            event_name: "InitiateCheckout",
+            event_time: Math.floor(Date.now() / 1000),
+            event_id: icEventId,
+            event_source_url: window.location.href,
+            action_source: "website",
+            user_data: serverUserData,
+            custom_data: payload,
+          });
+
+          // GOOGLE begin_checkout
+          var gBcEventId = generateEventId("gbc");
+          sendToGoogle("begin_checkout", {
+            client_id: getGaClientId(),
+            event_id: gBcEventId,
+            event_time: Math.floor(Date.now() / 1000),
+            event_source_url: window.location.href,
+            action_source: "website",
+            events: [
+              {
+                name: "begin_checkout",
+                params: {
+                  currency: parsedCart.currency,
+                  value: parsedCart.value,
+                  items: parsedCart.ga_items,
+                },
+              },
+            ],
+          });
+        } catch (error) {
+          localStorage.removeItem("fb_capi_initial_checkout");
+        }
+      }
+    };
+    document.addEventListener("focusin", handleCheckoutFocus);
+
+    // --- GOOGLE VIEW_CART (Оптимальное решение: наблюдение за <body>) ---
+    var isCartOpen = false;
+    var bodyObserver = new MutationObserver((mutations) => {
+      mutations.forEach((mutation) => {
+        if (mutation.attributeName === "class") {
+          var hasCartClass = document.body.classList.contains(
+            "t706__body_cartwinshowed",
+          );
+
+          if (hasCartClass && !isCartOpen) {
+            isCartOpen = true; // Корзина открылась
+
+            setTimeout(() => {
+              // Ждем 300мс для финального обновления localStorage 'tcart'
+              var cart = JSON.parse(localStorage.getItem("tcart") || "{}");
+              if (!cart.products || cart.products.length === 0) return;
+              var parsedCart = parseTildaCartData(cart);
+
+              var gVcEventId = generateEventId("gvcart");
+              sendToGoogle("view_cart", {
+                client_id: getGaClientId(),
+                event_id: gVcEventId,
+                event_time: Math.floor(Date.now() / 1000),
+                event_source_url: window.location.href,
+                action_source: "website",
+                events: [
+                  {
+                    name: "view_cart",
+                    params: {
+                      currency: "PLN",
+                      value: parsedCart.value,
+                      items: parsedCart.ga_items,
+                    },
+                  },
+                ],
+              });
+            }, 300);
+          } else if (!hasCartClass && isCartOpen) {
+            isCartOpen = false; // Корзина закрылась
+          }
+        }
+      });
+    });
+    // Наблюдаем только за атрибутами <body> (0% нагрузки на процессор)
+    bodyObserver.observe(document.body, {
+      attributes: true,
+      attributeFilter: ["class"],
+    });
+
+    // --- ПРОВЕРКА СТРАНИЦЫ thx-page (ФИНАЛИЗАЦИЯ PURCHASE) ---
+    if (window.location.href.includes("thx-page")) {
+      var pendingDataStr = localStorage.getItem("rb_meta_pending");
+      if (pendingDataStr) {
+        try {
+          var data = JSON.parse(pendingDataStr);
+          var parsedCart = parseTildaCartData(data.cart);
+
+          // Advanced Matching
+          var pixelUserDataPurchase = {};
+          if (data.external_id)
+            pixelUserDataPurchase.external_id = data.external_id;
+          if (data.phoneInput)
+            pixelUserDataPurchase.ph = data.phoneInput.replace(/\D/g, "");
+          if (data.emailInput)
+            pixelUserDataPurchase.em = data.emailInput.toLowerCase().trim();
+          if (data.firstNameInput)
+            pixelUserDataPurchase.fn = data.firstNameInput
+              .toLowerCase()
+              .trim();
+          if (data.lastNameInput)
+            pixelUserDataPurchase.ln = data.lastNameInput
+              .toLowerCase()
+              .trim();
+          if (data.cityInput)
+            pixelUserDataPurchase.ct = data.cityInput.toLowerCase().trim();
+
+          if (Object.keys(pixelUserDataPurchase).length > 0) {
+            fbq("init", PIXEL_ID, pixelUserDataPurchase);
+          }
+
+          var payload = {
+            content_type: "product",
+            content_ids: parsedCart.content_ids,
+            contents: parsedCart.contents,
+            value: parsedCart.value,
+            currency: parsedCart.currency,
+            num_items: parsedCart.num_items,
+          };
+
+          dispatchEvent("track", "Purchase", payload, {
+            eventID: data.eventId,
+          });
+
+          sendToCapi("purchase", {
+            event_name: "Purchase",
+            event_time: data.event_time,
+            event_id: data.eventId,
+            event_source_url: data.event_source_url,
+            action_source: "website",
+            user_data: {
+              first_name: data.firstNameInput,
+              last_name: data.lastNameInput,
+              city: data.cityInput,
+              email: data.emailInput,
+              phone: data.phoneInput,
+              fbc: data.fbc,
+              fbp: data.fbp,
+              client_user_agent: data.client_user_agent,
+            },
+            cart: data.cart,
+          });
+        } catch (error) {
+          console.error("Purchase processing error:", error);
+        } finally {
+          localStorage.removeItem("rb_meta_pending");
+          localStorage.removeItem("fb_capi_initial_checkout");
+        }
+      }
+    }
+  });
+
+  // =========================================================================
+  // 5. ГЛОБАЛЬНЫЙ СЛУШАТЕЛЬ ФОРМ ТИЛЬДЫ (ДЕЛЕГИРОВАНИЕ)
+  // =========================================================================
+  // Работает без jQuery, ловит всплывающие события от любых форм
+  document.addEventListener("tildaform:aftersuccess", (e) => {
+    var form = e.target;
+    if (!form) return;
+
+    // А. ЛОГИКА PURCHASE (Сохранение корзины)
+    if (form.closest(".t706__orderform")) {
+      try {
+        var cart = JSON.parse(localStorage.getItem("tcart") || "{}");
+
+        // Ищем ID транзакции в DataLayer
+        var dl = window.dataLayer || [];
+        var txId = null;
+        for (let i = dl.length - 1; i >= 0; i--) {
+          var x = dl[i] || {};
+          txId =
+            x?.ecommerce?.purchase?.actionField?.id ||
+            x?.ecommerce?.transaction_id ||
+            x?.transaction_id;
+          if (txId) break;
+        }
+
+        var fallbackUuid =
+          window.crypto && crypto.randomUUID
+            ? crypto.randomUUID()
+            : String(Date.now());
+        var eventId =
+          (txId ? String(txId) : cart.orderid || fallbackUuid) + "_purchase";
+
+        var phoneInput = form.querySelector("[type=tel]")?.value || "";
+
+        var dataObj = {
+          cart,
+          eventId,
+          phoneInput: phoneInput,
+          firstNameInput: form.querySelector("[name=name]")?.value || "",
+          lastNameInput: form.querySelector("[name=surname]")?.value || "",
+          cityInput: form.querySelector("[name=EUROPE_CITY]")?.value || "",
+          emailInput: form.querySelector("[type=email]")?.value || "",
+          event_time: Math.floor(Date.now() / 1000),
+          fbc: getCookie("_fbc"),
+          fbp: getCookie("_fbp"),
+          event_source_url: window.location.href,
+          client_user_agent: navigator.userAgent,
+          external_id: getExternalId(phoneInput), // Безопасный вызов (phoneInput уже объявлен)
+        };
+
+        localStorage.setItem("rb_meta_pending", JSON.stringify(dataObj));
+      } catch (err) {
+        console.error("[Purchase save error]", err);
+      }
+    }
+  });
+})();
+
+/* ===================== 4. TikTok Pixel ===================== */
+
+!(function (w, d, t) {
+  w.TiktokAnalyticsObject = t;
+  var ttq = (w[t] = w[t] || []);
+  ((ttq.methods = [
+    "page",
+    "track",
+    "identify",
+    "instances",
+    "debug",
+    "on",
+    "off",
+    "once",
+    "ready",
+    "alias",
+    "group",
+    "enableCookie",
+    "disableCookie",
+    "holdConsent",
+    "revokeConsent",
+    "grantConsent",
+  ]),
+    (ttq.setAndDefer = function (t, e) {
+      t[e] = function () {
+        t.push([e].concat(Array.prototype.slice.call(arguments, 0)));
+      };
+    }));
+  for (var i = 0; i < ttq.methods.length; i++)
+    ttq.setAndDefer(ttq, ttq.methods[i]);
+  ((ttq.instance = function (t) {
+    for (var e = ttq._i[t] || [], n = 0; n < ttq.methods.length; n++)
+      ttq.setAndDefer(e, ttq.methods[n]);
+    return e;
+  }),
+    (ttq.load = function (e, n) {
+      var r = "https://analytics.tiktok.com/i18n/pixel/events.js",
+        o = n && n.partner;
+      ((ttq._i = ttq._i || {}),
+        (ttq._i[e] = []),
+        (ttq._i[e]._u = r),
+        (ttq._t = ttq._t || {}),
+        (ttq._t[e] = +new Date()),
+        (ttq._o = ttq._o || {}),
+        (ttq._o[e] = n || {}));
+      n = document.createElement("script");
+      ((n.type = "text/javascript"),
+        (n.async = !0),
+        (n.src = r + "?sdkid=" + e + "&lib=" + t));
+      e = document.getElementsByTagName("script")[0];
+      e.parentNode.insertBefore(n, e);
+    }));
+
+  ttq.load("CVSFT93C77UF96PLUHKG");
+  ttq.page();
+})(window, document, "ttq");
+
+/* ===================== 8. Extra cart fields -> order form (PL only) =====================
+
+   Переносит цены допов Тильды (страховка, гарантия, экспресс, наложка) в
+   скрытые поля формы заказа. Секции нет на других сайтах.
+
+   Раньше это был отдельный <script> в хеде: если jQuery не поднялся, падал
+   только он. В общем бандле необработанное исключение снесло бы всё, что
+   ниже, поэтому здесь тот же guard, что и в секции 5 других сайтов. */
+
+(function () {
+  if (typeof window.jQuery === "undefined") return;
+  var $ = window.jQuery;
+
+  $(document).ready(function () {
+    function convertCurrencyStringToNumber(currencyString) {
+      // Удаляем пробелы и " zł" из строки
+      const cleanedString = currencyString.replace(/\s?zł/, "");
+
+      // Заменяем запятую на точку для правильного преобразования в число
+      const numberString = cleanedString.replace(",", ".");
+
+      // Преобразуем строку в число с плавающей точкой
+      const number = parseFloat(numberString);
+
+      // Проверяем, успешно ли преобразование, и возвращаем результат
+      if (!isNaN(number)) {
+        return number;
+      } else {
+        return NaN; // Возвращаем NaN, если преобразование не удалось
+      }
+    }
+    // Класс элемента, который мы хотим отслеживать внутри динамических элементов
+    const targetClass = "easy-additional-product"; // Замени на реальный класс
+
+    // Селектор для динамически добавляемых элементов
+    const dynamicParentSelector = ".t706__cartwin-content"; // Или другой ближайший статичный родитель
+
+    // Настройки первого observer (следит за добавлением .easy-additional-products)
+    const observerConfig = { childList: true, subtree: true };
+
+    // Функция обратного вызова для первого observer
+    const observerCallback = function (mutationsList, observer) {
+      for (const mutation of mutationsList) {
+        if (mutation.type === "childList") {
+          mutation.addedNodes.forEach(function (addedNode) {
+            // Проверяем, является ли добавленный узел элементом и имеет ли класс .easy-additional-products
+            if (
+              addedNode.nodeType === 1 &&
+              $(addedNode).hasClass("easy-additional-products")
+            ) {
+              console.log(
+                "Найден динамически добавленный элемент .easy-additional-products:",
+                addedNode,
+              );
+              $(".easy-additional-product").each(function (i, el) {
+                console.log(i, el);
+                let name_field = $(el).attr("easy-product-type");
+                let price_field = convertCurrencyStringToNumber(
+                  $(el).find(".easy-additional-product-price span").text(),
+                );
+                if (name_field == "ubezpieczenie") {
+                  name_field = "INSURANCE";
+                }
+                if (name_field == "gwarancja") {
+                  name_field = "GUARANTEE";
+                }
+                if (name_field == "express") {
+                  name_field = "FAST_DELIVERY";
+                }
+                if (name_field == "pobranie") {
+                  name_field = "CASH_ON_DELIVERY";
+                }
+                $(document)
+                  .find("[name=" + name_field + "]")
+                  .val(price_field);
+                console.log(name_field, price_field);
+              });
+              // Устанавливаем второй observer для отслеживания элементов с targetClass внутри него
+              observeTargetClass(addedNode);
+            } else if (addedNode.nodeType === 1) {
+              // Проверяем, нет ли внутри добавленного элемента потомков с классом .easy-additional-products
+              $(addedNode)
+                .find(".easy-additional-products")
+                .each(function () {
+                  console.log(
+                    "Найден потомок .easy-additional-products:",
+                    this,
+                  );
+                  observeTargetClass(this);
+                });
+            }
+          });
+          mutation.removedNodes.forEach(function (removedNode) {
+            // Если удаляется элемент .easy-additional-products, можно выполнить какие-то действия
+            if (
+              removedNode.nodeType === 1 &&
+              $(removedNode).hasClass("easy-additional-products")
+            ) {
+              console.log(
+                "Удален динамический элемент .easy-additional-products:",
+                removedNode,
+              );
+              // Возможно, здесь нужно отсоединить observer, если он был установлен для этого элемента
+            }
+          });
+        }
+      }
+    };
+
+    // Создаем экземпляр первого observer
+    const observer = new MutationObserver(observerCallback);
+
+    // Начинаем наблюдение за родителем динамически добавляемых элементов
+    const parentElement = $(dynamicParentSelector)[0];
+    if (parentElement) {
+      observer.observe(parentElement, observerConfig);
+      console.log(
+        "Установлено наблюдение за",
+        dynamicParentSelector,
+        "для поиска .easy-additional-products",
+      );
+    } else {
+      console.error("Не найден родительский элемент:", dynamicParentSelector);
+    }
+
+    // Функция для установки второго observer на найденный .easy-additional-products элемент
+    function observeTargetClass(targetElement) {
+      const targetObserverConfig = { childList: true }; // Следим только за добавлением/удалением прямых дочерних элементов
+      const targetObserverCallback = function (mutationsList) {
+        for (const mutation of mutationsList) {
+          if (mutation.type === "childList") {
+            mutation.addedNodes.forEach(function (addedNode) {
+              if (
+                addedNode.nodeType === 1 &&
+                $(addedNode).hasClass(targetClass)
+              ) {
+                console.log(
+                  "Внутри .easy-additional-products добавлен элемент с классом",
+                  targetClass,
+                  ":",
+                  addedNode,
+                );
+                // Выполняем нужные действия при добавлении targetClass
+                let name_field = $(addedNode).attr("easy-product-type");
+                let price_field = convertCurrencyStringToNumber(
+                  $(addedNode)
+                    .find(".easy-additional-product-price span")
+                    .text(),
+                );
+                if (name_field == "ubezpieczenie") {
+                  name_field = "INSURANCE";
+                }
+                if (name_field == "gwarancja") {
+                  name_field = "GUARANTEE";
+                }
+                if (name_field == "express") {
+                  name_field = "FAST_DELIVERY";
+                }
+                if (name_field == "pobranie") {
+                  name_field = "CASH_ON_DELIVERY";
+                }
+                $(document)
+                  .find("[name=" + name_field + "]")
+                  .val(price_field);
+                console.log(name_field, price_field);
+              }
+            });
+            mutation.removedNodes.forEach(function (removedNode) {
+              if (
+                removedNode.nodeType === 1 &&
+                $(removedNode).hasClass(targetClass)
+              ) {
+                console.log(
+                  "Внутри .easy-additional-products удален элемент с классом",
+                  targetClass,
+                  ":",
+                  removedNode,
+                );
+                // Выполняем нужные действия при удалении targetClass
+                let name_field = $(removedNode).attr("easy-product-type");
+                if (name_field == "ubezpieczenie") {
+                  name_field = "INSURANCE";
+                }
+                if (name_field == "gwarancja") {
+                  name_field = "GUARANTEE";
+                }
+                if (name_field == "express") {
+                  name_field = "FAST_DELIVERY";
+                }
+                if (name_field == "pobranie") {
+                  name_field = "CASH_ON_DELIVERY";
+                }
+                $(document)
+                  .find("[name=" + name_field + "]")
+                  .val(0);
+                console.log(name_field, 0);
+              }
+            });
+          }
+        }
+      };
+      const targetObserver = new MutationObserver(targetObserverCallback);
+      targetObserver.observe(targetElement, targetObserverConfig);
+      console.log(
+        "Установлено наблюдение за дочерними элементами внутри",
+        targetElement,
+        "для класса",
+        targetClass,
+      );
+    }
+  });
+})();
