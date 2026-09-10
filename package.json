@@ -4,7 +4,8 @@
   "main": "index.js",
   "scripts": {
     "build:robeauty": "terser src/head.js -c -m --format comments=false -o dist/head.min.js",
-    "build:manera": "terser src/manera-head.js -c -m --format comments=false -o dist/manera.min.js"
+    "build:manera": "terser src/manera-head.js -c -m --format comments=false -o dist/manera.min.js",
+    "bump": "node scripts/bump.mjs"
   },
   "keywords": [],
   "author": "",
