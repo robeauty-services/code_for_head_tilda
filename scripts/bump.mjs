@@ -7,8 +7,8 @@
  * It has drifted before (the file claimed v1.0.3 while robeauty.me served
  * v1.0.6), so bump it from here instead of by hand.
  *
- *   node scripts/bump.mjs                  # show what each site is pinned to
- *   node scripts/bump.mjs manera 1.0.1     # rebuild + repin to manera-v1.0.1
+ *   npm run bump                  # show what each site is pinned to
+ *   npm run bump manera 1.0.1     # rebuild + repin to manera-v1.0.1
  */
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -50,7 +50,7 @@ if (!name) {
   for (const [key, site] of Object.entries(SITES)) {
     console.log(`${key.padEnd(9)} ${currentPin(site)}  -> ${site.tilda}`);
   }
-  console.log("\nusage: node scripts/bump.mjs <site> <version>   e.g. manera 1.0.1");
+  console.log("\nusage: npm run bump <site> <version>   e.g. npm run bump manera 1.0.1");
   process.exit(0);
 }
 

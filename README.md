@@ -31,11 +31,11 @@
 npm run build:robeauty   # src/head.js        -> dist/head.min.js
 npm run build:manera     # src/manera-head.js -> dist/manera.min.js
 
-node scripts/bump.mjs                 # показати, на який тег запінений кожен сайт
-node scripts/bump.mjs manera 1.0.1    # перебілдити + перепінити на manera-v1.0.1
+npm run bump                 # показати, на який тег запінений кожен сайт
+npm run bump manera 1.0.1    # перебілдити + перепінити на manera-v1.0.1
 ```
 
-`bump.mjs` робить перші два кроки релізу за тебе: збирає бандл і підмінює
+`npm run bump` робить перші два кроки релізу за тебе: збирає бандл і підмінює
 версію в jsDelivr-URL всередині `tilda_head_without_scripts/*.html`. Саме цей
 URL найлегше забути — він єдиний, що реально вирішує, який код виконають
 відвідувачі, і він уже розʼїжджався з реальністю.
