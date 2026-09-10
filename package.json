@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "build": "terser src/head.js -c -m --format comments=false -o dist/head.min.js"
+    "build:robeauty": "terser src/head.js -c -m --format comments=false -o dist/head.min.js",
+    "build:manera": "terser src/manera-head.js -c -m --format comments=false -o dist/manera.min.js"
   },
   "keywords": [],
   "author": "",
