@@ -29,6 +29,12 @@ const SITES = {
     bundle: "dist/manera.min.js",
     tilda: "maneraparfum.com — Tilda project 9787525",
   },
+  pl: {
+    build: "build:pl",
+    head: "tilda_head_without_scripts/tilda_pl_head.html",
+    bundle: "dist/pl.min.js",
+    tilda: "pl.robeauty.me — Tilda project 6512256",
+  },
 };
 
 const REPO = "robeauty-services/code_for_head_tilda";
