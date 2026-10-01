@@ -963,73 +963,101 @@ document.addEventListener("DOMContentLoaded", function () {
       attributeFilter: ["class"],
     });
 
-    // --- ПРОВЕРКА СТРАНИЦЫ THANKS (ФИНАЛИЗАЦИЯ PURCHASE) ---
-    if (
+    // --- ФИНАЛИЗАЦИЯ PURCHASE ---
+    // Заказ с оплатой при получении: Purchase уходит на странице thanks, как и
+    // раньше. Заказ с онлайн-оплатой: только после того, как бэкенд подтвердил,
+    // что оплаченный заказ дошёл (секция 9) — иначе Purchase получали и те, кто
+    // вернулся с платёжной страницы, не заплатив (8.5% событий в сентябре 2026).
+    var onThanksPage =
       window.location.href.includes("thanks") ||
-      window.location.href.includes("thx-claude")
-    ) {
-      var pendingDataStr = localStorage.getItem("rb_meta_pending");
-      if (pendingDataStr) {
-        try {
-          var data = JSON.parse(pendingDataStr);
-          var parsedCart = parseTildaCartData(data.cart);
+      window.location.href.includes("thx-claude");
 
-          // Advanced Matching
-          var pixelUserDataPurchase = {};
-          if (data.external_id)
-            pixelUserDataPurchase.external_id = data.external_id;
-          if (data.phoneInput)
-            pixelUserDataPurchase.ph = data.phoneInput.replace(/\D/g, "");
-          if (data.emailInput)
-            pixelUserDataPurchase.em = data.emailInput.toLowerCase().trim();
-          if (data.firstNameInput)
-            pixelUserDataPurchase.fn = data.firstNameInput.toLowerCase().trim();
-          if (data.lastNameInput)
-            pixelUserDataPurchase.ln = data.lastNameInput.toLowerCase().trim();
-          if (data.cityInput)
-            pixelUserDataPurchase.ct = data.cityInput.toLowerCase().trim();
+    var firePendingPurchase = function (data) {
+      try {
+        var parsedCart = parseTildaCartData(data.cart);
 
-          if (Object.keys(pixelUserDataPurchase).length > 0) {
-            fbq("init", PIXEL_ID, pixelUserDataPurchase);
-          }
+        // Advanced Matching
+        var pixelUserDataPurchase = {};
+        if (data.external_id)
+          pixelUserDataPurchase.external_id = data.external_id;
+        if (data.phoneInput)
+          pixelUserDataPurchase.ph = data.phoneInput.replace(/\D/g, "");
+        if (data.emailInput)
+          pixelUserDataPurchase.em = data.emailInput.toLowerCase().trim();
+        if (data.firstNameInput)
+          pixelUserDataPurchase.fn = data.firstNameInput.toLowerCase().trim();
+        if (data.lastNameInput)
+          pixelUserDataPurchase.ln = data.lastNameInput.toLowerCase().trim();
+        if (data.cityInput)
+          pixelUserDataPurchase.ct = data.cityInput.toLowerCase().trim();
 
-          var payload = {
-            content_type: "product",
-            content_ids: parsedCart.content_ids,
-            contents: parsedCart.contents,
-            value: parsedCart.value,
-            currency: parsedCart.currency,
-            num_items: parsedCart.num_items,
-          };
-
-          dispatchEvent("track", "Purchase", payload, {
-            eventID: data.eventId,
-          });
-
-          sendToCapi("purchase", {
-            event_name: "Purchase",
-            event_time: data.event_time,
-            event_id: data.eventId,
-            event_source_url: data.event_source_url,
-            action_source: "website",
-            user_data: {
-              first_name: data.firstNameInput,
-              last_name: data.lastNameInput,
-              city: data.cityInput,
-              email: data.emailInput,
-              phone: data.phoneInput,
-              fbc: data.fbc,
-              fbp: data.fbp,
-              client_user_agent: data.client_user_agent,
-            },
-            cart: data.cart,
-          });
-        } catch (error) {
-          console.error("Purchase processing error:", error);
-        } finally {
-          localStorage.removeItem("rb_meta_pending");
-          localStorage.removeItem("fb_capi_initial_checkout");
+        if (Object.keys(pixelUserDataPurchase).length > 0) {
+          fbq("init", PIXEL_ID, pixelUserDataPurchase);
         }
+
+        var payload = {
+          content_type: "product",
+          content_ids: parsedCart.content_ids,
+          contents: parsedCart.contents,
+          value: parsedCart.value,
+          currency: parsedCart.currency,
+          num_items: parsedCart.num_items,
+        };
+
+        dispatchEvent("track", "Purchase", payload, {
+          eventID: data.eventId,
+        });
+
+        sendToCapi("purchase", {
+          event_name: "Purchase",
+          event_time: data.event_time,
+          event_id: data.eventId,
+          event_source_url: data.event_source_url,
+          action_source: "website",
+          user_data: {
+            first_name: data.firstNameInput,
+            last_name: data.lastNameInput,
+            city: data.cityInput,
+            email: data.emailInput,
+            phone: data.phoneInput,
+            fbc: data.fbc,
+            fbp: data.fbp,
+            client_user_agent: data.client_user_agent,
+          },
+          cart: data.cart,
+        });
+      } catch (error) {
+        console.error("Purchase processing error:", error);
+      } finally {
+        localStorage.removeItem("rb_meta_pending");
+        localStorage.removeItem("fb_capi_initial_checkout");
+      }
+    };
+
+    var pendingDataStr = localStorage.getItem("rb_meta_pending");
+    if (pendingDataStr) {
+      var pendingData = null;
+      try {
+        pendingData = JSON.parse(pendingDataStr);
+      } catch (error) {
+        localStorage.removeItem("rb_meta_pending");
+      }
+
+      var gate = window.rbPaidGate;
+      var paidOnline =
+        pendingData && pendingData.payment && pendingData.payment !== "cash";
+
+      if (pendingData && (!paidOnline || !gate)) {
+        // Наложенный платёж, запись старого формата или секция 9 не загрузилась.
+        if (onThanksPage) firePendingPurchase(pendingData);
+      } else if (pendingData && gate.isExpired(pendingData.ts)) {
+        localStorage.removeItem("rb_meta_pending");
+      } else if (pendingData) {
+        gate.whenPaid(pendingData.orderId, function () {
+          // Другая вкладка могла отправить это же событие, пока шла проверка.
+          if (localStorage.getItem("rb_meta_pending") !== pendingDataStr) return;
+          firePendingPurchase(pendingData);
+        });
       }
     }
   });
@@ -1071,6 +1099,12 @@ document.addEventListener("DOMContentLoaded", function () {
         var dataObj = {
           cart,
           eventId,
+          // Для проверки оплаты на странице thanks (секция 9).
+          orderId: txId ? String(txId) : "",
+          payment: String(
+            form.querySelector('[name="paymentsystem"]:checked')?.value || "",
+          ).toLowerCase(),
+          ts: Date.now(),
           phoneInput: phoneInput,
           firstNameInput: form.querySelector("[name=name]")?.value || "",
           lastNameInput: form.querySelector("[name=surname]")?.value || "",
@@ -1951,6 +1985,312 @@ document.addEventListener("DOMContentLoaded", function () {
       document.addEventListener("DOMContentLoaded", start);
     } else {
       start();
+    }
+  } catch (e) {}
+})();
+
+/* ===================== 9. Paid-only purchase events ===================== */
+/* Tilda announces a purchase the moment the cart form is submitted — before the
+   redirect to the payment page. GTM turns that announcement into the GA4
+   purchase and the Google Ads conversions, so every abandoned or declined
+   online payment was counted as a sale: 22% of GA4 purchases in September 2026
+   had no order behind them.
+
+   For online payment this section holds the announcement back and replays it,
+   unchanged, once the backend confirms the paid order arrived (Tilda only
+   delivers such an order to tilda-orders after payment). Cash-on-delivery
+   orders are not touched: they always become orders, and they fire at submit
+   exactly as before.
+
+   Everything here fails open. If the hold cannot be set up, the payment method
+   cannot be read or the held event cannot be stored, Tilda's announcement goes
+   through at submit as it always did — a missed hold costs accuracy, a wrong
+   one would cost a real purchase.
+
+   Section 3 uses `window.rbPaidGate` to put the Meta Purchase behind the same
+   confirmation. Backend: tilda-orders/src/order-status. */
+(function () {
+  try {
+    var STATUS_URL =
+      "https://payment-handler.site/api/tilda-orders/order-status";
+    var HELD_KEY = "rb_held_purchase";
+    // What the held announcement is called in dataLayer meanwhile. It keeps its
+    // `ecommerce` payload — section 3 reads the order id from there — but no
+    // GTM trigger listens for this name.
+    var HELD_EVENT = "rb_purchase_submitted";
+    // An unpaid WayForPay invoice expires well inside a day.
+    var TTL_MS = 24 * 60 * 60 * 1000;
+    // Seconds between checks while a thank-you page is open: 15 checks over
+    // five minutes. 96% of paid orders reach the backend within 5 s of the
+    // customer landing here, 98% within two minutes.
+    var THANKS_SCHEDULE = [0, 2, 2, 2, 4, 5, 5, 10, 15, 15, 30, 30, 60, 60, 60];
+    // This many failed checks with no answer at all means the backend cannot be
+    // reached from this browser (adblock, outage).
+    var UNREACHABLE_AFTER = 3;
+
+    function isThanksPage() {
+      var href = window.location.href;
+      return href.indexOf("thanks") > -1 || href.indexOf("thx-claude") > -1;
+    }
+
+    function isExpired(ts) {
+      return typeof ts === "number" && Date.now() - ts > TTL_MS;
+    }
+
+    /* Tilda's stat id is `T202609-1374965894`; the order itself is the digits. */
+    function bareOrderId(raw) {
+      var id = String(raw || "")
+        .trim()
+        .replace(/^T\d+-/i, "");
+      return /^\d{6,12}$/.test(id) ? id : "";
+    }
+
+    /* One question to the backend: "paid", "unpaid" or "error". */
+    function ask(id, cb) {
+      var settled = false;
+      var finish = function (answer) {
+        if (settled) return;
+        settled = true;
+        cb(answer);
+      };
+      try {
+        var ctl =
+          typeof AbortController === "function" ? new AbortController() : null;
+        var timer = setTimeout(function () {
+          if (ctl) ctl.abort();
+          finish("error");
+        }, 8000);
+        fetch(STATUS_URL + "?id=" + encodeURIComponent(id), {
+          credentials: "omit",
+          cache: "no-store",
+          signal: ctl ? ctl.signal : undefined,
+        })
+          .then(function (r) {
+            return r.ok ? r.json() : null;
+          })
+          .then(function (j) {
+            clearTimeout(timer);
+            if (!j || j.ok !== true) return finish("error");
+            finish(j.exists ? "paid" : "unpaid");
+          })
+          .catch(function () {
+            clearTimeout(timer);
+            finish("error");
+          });
+      } catch (e) {
+        finish("error");
+      }
+    }
+
+    /* Calls `onPaid` once the order is confirmed, and otherwise never.
+
+       On a thank-you page it keeps asking for five minutes; anywhere else it
+       asks once, which is how a customer who paid but came back to another
+       page still gets counted.
+
+       Two cases cannot be verified, and on a thank-you page both let the
+       purchase through, because that is what happened before this section
+       existed: an order id that is not an order id, and a backend that never
+       answered. A backend that did answer "unpaid" is never overridden. */
+    // One poll per order, however many callers wait on it — the GTM release
+    // below and the Meta Purchase in section 3 ask about the same order.
+    var polls = {};
+
+    function whenPaid(rawId, onPaid) {
+      var onThanks = isThanksPage();
+      var id = bareOrderId(rawId);
+      if (!id) {
+        if (onThanks) onPaid("unverifiable");
+        return;
+      }
+      if (polls[id]) {
+        polls[id].push(onPaid);
+        return;
+      }
+
+      var waiting = (polls[id] = [onPaid]);
+      var settle = function (how) {
+        delete polls[id];
+        for (var i = 0; i < waiting.length; i++) {
+          try {
+            waiting[i](how);
+          } catch (e) {}
+        }
+      };
+
+      var schedule = onThanks ? THANKS_SCHEDULE : [0];
+      var attempt = 0;
+      var errors = 0;
+      var step = function () {
+        ask(id, function (answer) {
+          if (answer === "paid") return settle("paid");
+          if (answer === "error") errors++;
+          attempt++;
+          if (onThanks && errors === attempt && errors >= UNREACHABLE_AFTER) {
+            return settle("unverified");
+          }
+          if (attempt < schedule.length) {
+            setTimeout(step, schedule[attempt] * 1000);
+          } else {
+            delete polls[id];
+          }
+        });
+      };
+      setTimeout(step, schedule[0] * 1000);
+    }
+
+    window.rbPaidGate = { whenPaid: whenPaid, isExpired: isExpired };
+
+    /* ---------- hold: Tilda's announcement at submit ---------- */
+
+    function paysOnline() {
+      var el =
+        document.querySelector('.t706 input[name="paymentsystem"]:checked') ||
+        document.querySelector('input[name="paymentsystem"]:checked');
+      var value = el && el.value ? String(el.value).toLowerCase() : "";
+      return value !== "" && value !== "cash";
+    }
+
+    /* The condition under which Tilda.sendEventToStatistics builds the
+       `purchase` push (tilda-events-1.0), plus ours: paid online. */
+    function shouldHold(page, price) {
+      return (
+        parseFloat(price) > 0 &&
+        typeof page === "string" &&
+        page.indexOf("/tilda/") > -1 &&
+        page.indexOf("/payment/") > -1 &&
+        !!window.tildaForm &&
+        window.tildaForm.orderIdForStat > "" &&
+        paysOnline()
+      );
+    }
+
+    function storeHeld(push) {
+      try {
+        var id = push.ecommerce.purchase.actionField.id;
+        if (!bareOrderId(id)) return false;
+        localStorage.setItem(
+          HELD_KEY,
+          JSON.stringify({ id: String(id), ts: Date.now(), push: push }),
+        );
+        return true;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    /* Tilda pushes with `window.dataLayer.push(...)`, looked up at call time,
+       so for the length of one synchronous call the pushes can be collected in
+       a stand-in array and forwarded afterwards — with the purchase renamed.
+       That avoids competing with GTM over `dataLayer.push`, which GTM replaces
+       with its own function whenever it loads. */
+    function wrap(original) {
+      var wrapped = function (page, title, product, price) {
+        var hold = false;
+        try {
+          hold = shouldHold(page, price);
+        } catch (e) {}
+        if (!hold) return original.apply(this, arguments);
+
+        var real = window.dataLayer;
+        var collected = [];
+        window.dataLayer = collected;
+        try {
+          return original.apply(this, arguments);
+        } finally {
+          window.dataLayer = real || [];
+          for (var i = 0; i < collected.length; i++) {
+            var item = collected[i];
+            var isPurchase =
+              item &&
+              item.event === "purchase" &&
+              item.ecommerce &&
+              item.ecommerce.purchase;
+            if (isPurchase && storeHeld(item)) {
+              var renamed = {};
+              for (var k in item) {
+                if (Object.prototype.hasOwnProperty.call(item, k)) {
+                  renamed[k] = item[k];
+                }
+              }
+              renamed.event = HELD_EVENT;
+              window.dataLayer.push(renamed);
+            } else {
+              window.dataLayer.push(item);
+            }
+          }
+        }
+      };
+      wrapped.__rbPaidGate = true;
+      return wrapped;
+    }
+
+    /* tilda-events may load before or after this file, and assigns
+       `Tilda.sendEventToStatistics = function…` either way. An accessor on the
+       shared `window.Tilda` object wraps whatever is assigned, whenever. */
+    function installHold() {
+      var tilda = (window.Tilda = window.Tilda || {});
+      var current = tilda.sendEventToStatistics;
+      if (typeof current === "function" && current.__rbPaidGate) return;
+      var active = typeof current === "function" ? wrap(current) : current;
+      try {
+        Object.defineProperty(tilda, "sendEventToStatistics", {
+          configurable: true,
+          enumerable: true,
+          get: function () {
+            return active;
+          },
+          set: function (fn) {
+            active =
+              typeof fn === "function" && !fn.__rbPaidGate ? wrap(fn) : fn;
+          },
+        });
+      } catch (e) {
+        if (typeof current === "function") {
+          tilda.sendEventToStatistics = wrap(current);
+        }
+      }
+    }
+
+    /* ---------- release: once the order is confirmed ---------- */
+
+    function readHeld() {
+      try {
+        var held = JSON.parse(localStorage.getItem(HELD_KEY) || "null");
+        return held && held.id && held.push ? held : null;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    function releaseHeld() {
+      var held = readHeld();
+      if (!held) return;
+      if (isExpired(held.ts)) {
+        localStorage.removeItem(HELD_KEY);
+        return;
+      }
+      whenPaid(held.id, function () {
+        // Another tab may have released it while this one was asking.
+        var now = readHeld();
+        if (!now || now.id !== held.id) return;
+        localStorage.removeItem(HELD_KEY);
+        window.dataLayer = window.dataLayer || [];
+        window.dataLayer.push(now.push);
+      });
+    }
+
+    installHold();
+
+    var onReady = function () {
+      // In case something replaced the whole `window.Tilda` object meanwhile.
+      installHold();
+      releaseHeld();
+    };
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", onReady);
+    } else {
+      onReady();
     }
   } catch (e) {}
 })();
