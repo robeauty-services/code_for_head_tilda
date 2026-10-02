@@ -802,6 +802,20 @@
     // А. ЛОГИКА PURCHASE (полностью при успешной отправке формы)
     if (form.closest(".t706__orderform")) {
       try {
+        // Онлайн-оплата: свой Purchase не шлём вообще. Его отправляет сторонний
+        // серверный источник — ровно один на оплаченный заказ и без event_id,
+        // поэтому с нашим он не склеивался и покупка считалась дважды (а наш
+        // уходил ещё и по неоплаченным заказам). Наш остаётся только для
+        // оплаты при получении; неизвестный способ оплаты считаем наложкой.
+        var paymentSystem = String(
+          form.querySelector('[name="paymentsystem"]:checked')?.value || "",
+        ).toLowerCase();
+        if (paymentSystem !== "" && paymentSystem !== "cash") {
+          localStorage.removeItem("rb_meta_pending");
+          localStorage.removeItem("fb_capi_initial_checkout");
+          return;
+        }
+
         var cart = JSON.parse(localStorage.getItem("tcart") || "{}");
 
         // Ищем ID транзакции в DataLayer
