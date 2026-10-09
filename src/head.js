@@ -1122,6 +1122,12 @@ document.addEventListener("DOMContentLoaded", function () {
       } catch (err) {
         console.error("[Purchase save error]", err);
       }
+
+      // Попытка оформления закончилась — следующая снова даст InitiateCheckout.
+      // Раньше флаг снимал только firePendingPurchase, а с секцией 9 он для
+      // онлайн-оплаты срабатывает лишь после подтверждённой оплаты: кто вернулся
+      // с WayForPay не заплатив, больше никогда не попадал в InitiateCheckout.
+      localStorage.removeItem("fb_capi_initial_checkout");
     }
 
     // Б. ЛОГИКА LEAD (Только на страницах b2b-partners)
