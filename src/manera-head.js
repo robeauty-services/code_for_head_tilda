@@ -55,6 +55,10 @@
     "00-00003533": "850500825754",
     "00-00003562": "233787853324",
     "00-00003563": "233787853324",
+    // 30 мл флакони (на сторінках з жовтня 2026) — SKU з літерами
+    "KU-0003397": "147479855464",
+    "KU-0003398": "850500825754",
+    "KU-0003399": "233787853324",
   };
   // =========================================================================
   // 2. ГЛОБАЛЬНЫЕ ФУНКЦИИ-ПОМОЩНИКИ (HELPERS)
@@ -150,7 +154,7 @@
 
       var id = elem.uid;
       if (!id) {
-        var match = elem.name.match(/(?:\[sku:|\()([0-9-]+)(?:\]|\))/);
+        var match = elem.name.match(/(?:\[sku:|\()([A-Z0-9-]+)(?:\]|\))/);
         if (match && match[1]) id = map_content_ids[match[1]] || match[1];
       }
 
@@ -451,7 +455,7 @@
         var rawId = Array.isArray(data.content_ids)
           ? String(data.content_ids[0])
           : String(data.content_ids);
-        var match = rawId.match(/(?:\[sku:|\()([0-9-]+)(?:\]|\))/);
+        var match = rawId.match(/(?:\[sku:|\()([A-Z0-9-]+)(?:\]|\))/);
         content_id = /^\d+$/.test(rawId)
           ? rawId
           : match
@@ -574,7 +578,7 @@
             if (lastEq !== -1)
               price = Number(mainPart.substring(lastEq + 1)) || 0;
 
-            var match = mainPart.match(/(?:\[sku:|\()([0-9-]+)(?:\]|\))/);
+            var match = mainPart.match(/(?:\[sku:|\()([A-Z0-9-]+)(?:\]|\))/);
             var rawSku = match && match[1] ? match[1] : null;
             if (rawSku) id = map_content_ids[rawSku] || rawSku;
 
