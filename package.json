@@ -6,6 +6,7 @@
     "build:robeauty": "terser src/head.js -c -m --format comments=false -o dist/head.min.js",
     "build:manera": "terser src/manera-head.js -c -m --format comments=false -o dist/manera.min.js",
     "build:pl": "terser src/pl-head.js -c -m --format comments=false -o dist/pl.min.js",
+    "test": "node --test test/*.test.mjs",
     "pins": "node scripts/release.mjs --list",
     "release:robeauty": "node scripts/release.mjs robeauty",
     "release:manera": "node scripts/release.mjs manera",
