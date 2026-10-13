@@ -136,6 +136,19 @@
     };
   };
 
+  // Данные покупательницы из формы корзины — в том виде, в каком их ждёт
+  // сервер: Purchase наложки и CheckoutContext онлайн-оплаты (секция 5).
+  var getOrderFormUserData = (form) => ({
+    first_name: form.querySelector("[name=name]")?.value || "",
+    last_name: form.querySelector("[name=surname]")?.value || "",
+    city: form.querySelector("[name=city]")?.value || "",
+    email: form.querySelector("[type=email]")?.value || "",
+    phone: form.querySelector("[type=tel]")?.value || "",
+    fbc: getCookie("_fbc"),
+    fbp: getCookie("_fbp"),
+    client_user_agent: navigator.userAgent,
+  });
+
   // Единый парсер корзины Тильды (устраняет дублирование кода для IC и Purchase)
   var parseTildaCartData = (cartObj) => {
     var result = {
@@ -806,17 +819,29 @@
     // А. ЛОГИКА PURCHASE (полностью при успешной отправке формы)
     if (form.closest(".t706__orderform")) {
       try {
-        // Онлайн-оплата: свой Purchase не шлём вообще. Его отправляет сторонний
-        // серверный источник — ровно один на оплаченный заказ и без event_id,
-        // поэтому с нашим он не склеивался и покупка считалась дважды (а наш
-        // уходил ещё и по неоплаченным заказам). Наш остаётся только для
-        // оплаты при получении; неизвестный способ оплаты считаем наложкой.
+        // Онлайн-оплата: Purchase из браузера не шлём вообще — ни пикселем, ни
+        // через CAPI: заказ ещё не оплачен, а оплаченный приходит на сервер
+        // вебхуком Тильды. Отсюда серверу уходит только CheckoutContext —
+        // fbp/fbc/браузер покупательницы, чтобы он приложил их к Purchase из
+        // вебхука; в Meta это событие не идёт. Наш Purchase остаётся только
+        // для оплаты при получении; неизвестный способ оплаты считаем наложкой.
+        // Проверку не убирать, даже когда выключат приёмник Тильды «FB pixel»:
+        // онлайн-покупки тогда шлёт сервер (README, раздел про секцию 5).
         var paymentSystem = String(
           form.querySelector('[name="paymentsystem"]:checked')?.value || "",
         ).toLowerCase();
+        var formUserData = getOrderFormUserData(form);
         if (paymentSystem !== "" && paymentSystem !== "cash") {
           localStorage.removeItem("rb_meta_pending");
           localStorage.removeItem("fb_capi_initial_checkout");
+          sendToCapi("checkout_context", {
+            event_name: "CheckoutContext",
+            event_time: Math.floor(Date.now() / 1000),
+            event_source_url: window.location.href,
+            action_source: "website",
+            payment_system: paymentSystem,
+            user_data: formUserData,
+          });
           return;
         }
 
@@ -841,21 +866,16 @@
         var eventId =
           (txId ? String(txId) : cart.orderid || fallbackUuid) + "_purchase";
 
-        var phoneInput = form.querySelector("[type=tel]")?.value || "";
-
         var dataObj = {
           eventId,
-          phoneInput: phoneInput,
-          firstNameInput: form.querySelector("[name=name]")?.value || "",
-          lastNameInput: form.querySelector("[name=surname]")?.value || "",
-          cityInput: form.querySelector("[name=city]")?.value || "",
-          emailInput: form.querySelector("[type=email]")?.value || "",
+          phoneInput: formUserData.phone,
+          firstNameInput: formUserData.first_name,
+          lastNameInput: formUserData.last_name,
+          cityInput: formUserData.city,
+          emailInput: formUserData.email,
           event_time: Math.floor(Date.now() / 1000),
-          fbc: getCookie("_fbc"),
-          fbp: getCookie("_fbp"),
           event_source_url: window.location.href,
-          client_user_agent: navigator.userAgent,
-          external_id: getExternalId(phoneInput),
+          external_id: getExternalId(formUserData.phone),
         };
 
         var parsedCart = parseTildaCartData(cart);
@@ -901,16 +921,7 @@
           event_id: dataObj.eventId,
           event_source_url: dataObj.event_source_url,
           action_source: "website",
-          user_data: {
-            first_name: dataObj.firstNameInput,
-            last_name: dataObj.lastNameInput,
-            city: dataObj.cityInput,
-            email: dataObj.emailInput,
-            phone: dataObj.phoneInput,
-            fbc: dataObj.fbc,
-            fbp: dataObj.fbp,
-            client_user_agent: dataObj.client_user_agent,
-          },
+          user_data: formUserData,
           cart: cart,
         });
 
