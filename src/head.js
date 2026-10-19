@@ -2294,3 +2294,446 @@ document.addEventListener("DOMContentLoaded", function () {
     }
   } catch (e) {}
 })();
+
+/* ===================== 10. Bonus redemption in cart ===================== */
+/* Дозволяє покупцеві списати власні бонуси просто в кошику, без дзвінка
+   менеджеру — саме це досі пропонував telegram-бот.
+
+   Знижка йде через `tcart.promocode.discountsum`, а не через ціни позицій.
+   Тільда вміє абсолютну знижку сама: `tcart__calcPromocode` розмазує її по
+   позиціях, рахує `prodamount_withdiscount` і кладе підсумок у `tcart.amount`,
+   який і йде на оплату. Ціни товарів при цьому лишаються повними, тож
+   аналітика по SKU не псується, а скрипт наборів (який переписує `p.price`
+   з конфігу) нам не заважає і ми не заважаємо йому.
+
+   Наслідок, який нам і потрібен: слот `tcart.promocode` один, тому бонуси і
+   промокод взаємно виключні без жодного окремого правила.
+
+   Бекенд: robeauty-api/services/kommo-service (`/bonus/request-code`,
+   `/bonus/verify`). Сума знижки, яку бачить сервер, перераховується там
+   заново — те, що лежить у `tcart`, редагується з консолі. */
+(function () {
+  try {
+    var API = "https://payment-handler.site/kommo_service/bonus";
+    var MIN_ORDER = 1500;
+    var RESEND_SEC = 60;
+    var LS_KEY = "robeauty_bonus_hold";
+
+    /* Поки що вмикається вручну: `?bonus_test=1` в адресі будь-якої сторінки.
+       Прапорець лишається в sessionStorage, бо Тільда під час оформлення
+       перекидає між сторінками і query-рядок губиться. Так можна тестувати
+       на справжньому кошику з справжніми товарами, не чіпаючи покупців. */
+    function enabled() {
+      try {
+        if (/(^|[?&])bonus_test=1/.test(window.location.search)) {
+          sessionStorage.setItem("robeauty_bonus_test", "1");
+        }
+        if (window.ROBEAUTY_BONUS_ENABLED === true) return true;
+        return sessionStorage.getItem("robeauty_bonus_test") === "1";
+      } catch (e) {
+        return window.ROBEAUTY_BONUS_ENABLED === true;
+      }
+    }
+
+    /* { id: <redemptionId>, amount: <грн>, code: "BONUS-<id>" } або null.
+       Тримаємо і в пам'яті, і в localStorage: `t_cart__applyPageSettings`
+       обнуляє `tcart.promocode` на кожній ініціалізації кошика, тож знижку
+       треба вміти наклеїти назад, а не поставити один раз. */
+    var hold = null;
+    var timer = null;
+    var resendLeft = 0;
+
+    function lsLoad() {
+      try {
+        var raw = localStorage.getItem(LS_KEY);
+        if (!raw) return null;
+        var v = JSON.parse(raw);
+        return v && v.id && v.amount > 0 ? v : null;
+      } catch (e) {
+        return null;
+      }
+    }
+    function lsSave(v) {
+      try {
+        if (v) localStorage.setItem(LS_KEY, JSON.stringify(v));
+        else localStorage.removeItem(LS_KEY);
+      } catch (e) {}
+    }
+
+    function cartWin() {
+      return document.querySelector(".t706__cartwin");
+    }
+    function cartOpen() {
+      var w = cartWin();
+      return !!w && w.style.display !== "none" && w.offsetParent !== null;
+    }
+    function prodAmount() {
+      var c = window.tcart;
+      return c && c.prodamount ? Number(c.prodamount) : 0;
+    }
+    function phoneValue() {
+      var w = cartWin();
+      var el = w && (w.querySelector('input[name="phone"]') || w.querySelector('input[type="tel"]'));
+      return el ? String(el.value || "").trim() : "";
+    }
+
+    function call(name) {
+      if (typeof window[name] === "function") {
+        try {
+          window[name]();
+        } catch (e) {}
+      }
+    }
+    /* Та сама послідовність, що й у скрипті наборів. Саме
+       `tcart__updateTotalProductsinCartObj` викликає `tcart__calcPromocode`,
+       тобто застосовує знижку й перераховує `tcart.amount`. */
+    function redrawCart() {
+      call("tcart__updateTotalProductsinCartObj");
+      call("tcart__saveLocalObj");
+      call("tcart__reDrawProducts");
+      call("tcart__reDrawTotal");
+      call("tcart__reDrawCartIcon");
+    }
+
+    function applyHold() {
+      if (!hold || !window.tcart) return;
+      window.tcart.promocode = {
+        promocode: hold.code,
+        discountsum: hold.amount,
+      };
+      redrawCart();
+    }
+
+    function clearHold() {
+      hold = null;
+      lsSave(null);
+      if (window.tcart && window.tcart.promocode) {
+        try {
+          delete window.tcart.promocode;
+        } catch (e) {
+          window.tcart.promocode = undefined;
+        }
+        redrawCart();
+      }
+      render();
+    }
+
+    /* Промокод і бонуси живуть в одному слоті, тому поле промокоду при
+       застосованих бонусах блокуємо — інакше Тільда просто перезапише нашу
+       знижку своєю і покупець побачить не те, що очікував. */
+    function syncPromoInput() {
+      var input = document.querySelector(".t-inputpromocode");
+      var btn = document.querySelector(".t-inputpromocode__btn");
+      var lock = !!hold;
+      if (input) {
+        input.disabled = lock;
+        input.style.opacity = lock ? "0.5" : "";
+        if (lock) input.value = "";
+      }
+      if (btn) {
+        btn.style.pointerEvents = lock ? "none" : "";
+        btn.style.opacity = lock ? "0.5" : "";
+      }
+    }
+
+    function post(path, body) {
+      return fetch(API + path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }).then(function (r) {
+        return r.json();
+      });
+    }
+
+    var REFUSAL_TEXT = {
+      disabled: "Списання бонусів тимчасово недоступне.",
+      bad_phone: "Перевірте номер телефону.",
+      cart_too_small: "Бонуси діють від суми замовлення " + MIN_ORDER + " ₴.",
+      no_bonuses: "На цьому номері немає доступних бонусів.",
+      cooldown: "Новий код можна запросити за хвилину.",
+      rate_limited: "Забагато спроб. Спробуйте пізніше.",
+      send_failed: "Не вдалося надіслати код. Спробуйте ще раз.",
+      bad_code: "Невірний код.",
+      expired: "Код прострочено — запросіть новий.",
+      burned: "Забагато невірних спроб. Запросіть новий код.",
+      not_found: "Спочатку запросіть код.",
+    };
+    function refusalText(key) {
+      return REFUSAL_TEXT[key] || "Щось пішло не так. Спробуйте ще раз.";
+    }
+
+    /* ---------- інтерфейс ---------- */
+
+    var STYLE_ID = "robeauty-bonus-style";
+    function ensureStyle() {
+      if (document.getElementById(STYLE_ID)) return;
+      var s = document.createElement("style");
+      s.id = STYLE_ID;
+      s.textContent =
+        ".rb-bonus{margin:10px 0 0;font-family:inherit}" +
+        ".rb-bonus__btn{display:block;width:100%;padding:14px 20px;border:1px solid #2e2e2e;" +
+        "border-radius:15px;background:#fff;color:#2e2e2e;font:inherit;font-size:15px;cursor:pointer;" +
+        "-webkit-appearance:none;appearance:none}" +
+        ".rb-bonus__btn:disabled{opacity:.5;cursor:default}" +
+        ".rb-bonus__btn--primary{background:#2e2e2e;color:#fff}" +
+        ".rb-bonus__row{display:flex;gap:8px;margin-top:8px}" +
+        ".rb-bonus__row .rb-bonus__btn{width:auto;flex:0 0 auto;padding:14px 18px}" +
+        ".rb-bonus__input{flex:1 1 auto;min-width:0;padding:14px 20px;border:1px solid #e3e3e3;" +
+        "border-radius:15px;font:inherit;font-size:15px;-webkit-appearance:none;appearance:none}" +
+        ".rb-bonus__note{margin:6px 2px 0;font-size:12px;line-height:1.35;color:#8c8c8c}" +
+        ".rb-bonus__note--err{color:#d0021b}" +
+        ".rb-bonus__applied{display:flex;align-items:center;justify-content:space-between;gap:10px;" +
+        "padding:13px 18px;border:1px solid #2e2e2e;border-radius:15px;font-size:15px}" +
+        ".rb-bonus__link{background:none;border:0;padding:0;font:inherit;font-size:13px;" +
+        "color:#8c8c8c;text-decoration:underline;cursor:pointer}";
+      document.head.appendChild(s);
+    }
+
+    function mount() {
+      var wrap = document.querySelector(".t-inputpromocode__wrapper");
+      if (!wrap) return null;
+      var el = document.querySelector(".rb-bonus");
+      if (el) return el;
+      ensureStyle();
+      el = document.createElement("div");
+      el.className = "rb-bonus";
+      // Тільда перебудовує вікно кошика при кожному відкритті, тож блок тут
+      // новий і порожній — забуваємо попередню розмітку, інакше перевірка
+      // «html не змінився» лишила б його порожнім назавжди.
+      lastHtml = null;
+      // Після блоку промокоду: для покупця це одна й та сама річ — «знижка».
+      wrap.parentNode.insertBefore(el, wrap.nextSibling);
+      return el;
+    }
+
+    var view = "idle"; // idle | code | applied
+    var lastHtml = null;
+    var note = "";
+    var noteErr = false;
+    var busy = false;
+
+    function setNote(text, isErr) {
+      note = text || "";
+      noteErr = !!isErr;
+    }
+
+    function render() {
+      var el = mount();
+      if (!el) return;
+      syncPromoInput();
+
+      var html = "";
+      if (hold) {
+        html =
+          '<div class="rb-bonus__applied"><span>Списано ' +
+          hold.amount +
+          " ₴ бонусами</span>" +
+          '<button type="button" class="rb-bonus__link" data-rb="cancel">Скасувати</button></div>';
+      } else if (view === "code") {
+        html =
+          '<div class="rb-bonus__row">' +
+          '<input class="rb-bonus__input" data-rb="code" inputmode="numeric" ' +
+          'autocomplete="one-time-code" maxlength="6" placeholder="Код з Viber або SMS">' +
+          '<button type="button" class="rb-bonus__btn rb-bonus__btn--primary" data-rb="confirm"' +
+          (busy ? " disabled" : "") +
+          ">Підтвердити</button></div>" +
+          '<div class="rb-bonus__note">' +
+          (resendLeft > 0
+            ? "Надіслати код ще раз можна за " + resendLeft + " с"
+            : '<button type="button" class="rb-bonus__link" data-rb="resend">Надіслати код ще раз</button>') +
+          "</div>";
+      } else {
+        html =
+          '<button type="button" class="rb-bonus__btn" data-rb="send"' +
+          (busy ? " disabled" : "") +
+          ">" +
+          (busy ? "Надсилаємо…" : "Списати бонуси") +
+          "</button>" +
+          '<div class="rb-bonus__note">Бонуси діють від суми замовлення ' +
+          MIN_ORDER +
+          " ₴ і покривають до 50% замовлення.</div>";
+      }
+
+      if (note) {
+        html +=
+          '<div class="rb-bonus__note' +
+          (noteErr ? " rb-bonus__note--err" : "") +
+          '">' +
+          note +
+          "</div>";
+      }
+
+      /* Сторож смикає render() двічі на секунду, а зворотний відлік міняє
+         текст щосекунди — без цієї перевірки ми б переписували innerHTML
+         під покупцем і стирали код, який він саме набирає. Тому: пишемо
+         тільки коли розмітка справді змінилась, і переносимо введене
+         значення та фокус у нову. */
+      if (html === lastHtml) return;
+      lastHtml = html;
+
+      var prev = el.querySelector('[data-rb="code"]');
+      var typed = prev ? prev.value : null;
+      var hadFocus = prev && document.activeElement === prev;
+
+      el.innerHTML = html;
+
+      if (typed !== null) {
+        var next = el.querySelector('[data-rb="code"]');
+        if (next) {
+          next.value = typed;
+          if (hadFocus) {
+            next.focus();
+            try {
+              next.setSelectionRange(typed.length, typed.length);
+            } catch (e) {}
+          }
+        }
+      }
+    }
+
+    function startResendCountdown() {
+      resendLeft = RESEND_SEC;
+      if (timer) clearInterval(timer);
+      timer = setInterval(function () {
+        resendLeft -= 1;
+        if (resendLeft <= 0) {
+          clearInterval(timer);
+          timer = null;
+          resendLeft = 0;
+        }
+        if (view === "code") render();
+      }, 1000);
+    }
+
+    function requestCode() {
+      var phone = phoneValue();
+      if (!phone) {
+        setNote("Спочатку введіть номер телефону.", true);
+        render();
+        return;
+      }
+      busy = true;
+      setNote("");
+      render();
+
+      post("/request-code", { phone: phone, cartTotal: prodAmount() })
+        .then(function (res) {
+          busy = false;
+          if (!res || !res.ok) {
+            setNote(refusalText(res && res.refusal), true);
+            render();
+            return;
+          }
+          view = "code";
+          setNote("Код надіслано у Viber або SMS.", false);
+          startResendCountdown();
+          render();
+        })
+        .catch(function () {
+          busy = false;
+          setNote(refusalText("send_failed"), true);
+          render();
+        });
+    }
+
+    function confirmCode() {
+      var el = document.querySelector('[data-rb="code"]');
+      var code = el ? String(el.value || "").replace(/\D/g, "") : "";
+      if (code.length !== 6) {
+        setNote("Введіть 6 цифр коду.", true);
+        render();
+        return;
+      }
+      busy = true;
+      setNote("");
+      render();
+
+      post("/verify", {
+        phone: phoneValue(),
+        code: code,
+        cartTotal: prodAmount(),
+      })
+        .then(function (res) {
+          busy = false;
+          if (!res || !res.ok) {
+            setNote(refusalText(res && res.refusal), true);
+            render();
+            return;
+          }
+          hold = {
+            id: res.redemptionId,
+            amount: res.amount,
+            code: "BONUS-" + res.redemptionId,
+          };
+          lsSave(hold);
+          view = "applied";
+          setNote("");
+          applyHold();
+          render();
+        })
+        .catch(function () {
+          busy = false;
+          setNote(refusalText("bad_code"), true);
+          render();
+        });
+    }
+
+    document.addEventListener("click", function (e) {
+      var t = e.target;
+      if (!t || !t.getAttribute) return;
+      var action = t.getAttribute("data-rb");
+      if (!action) return;
+      e.preventDefault();
+      if (action === "send" || action === "resend") requestCode();
+      else if (action === "confirm") confirmCode();
+      else if (action === "cancel") {
+        view = "idle";
+        setNote("");
+        clearHold();
+      }
+    });
+
+    /* Сторож. Робить дві речі, і обидві потрібні саме через те, як поводиться
+       кошик Тільди:
+         - вставляє блок, коли кошик щойно відкрили (DOM створюється на льоту);
+         - наклеює знижку назад після кожної ініціалізації кошика, бо
+           `t_cart__applyPageSettings` щоразу ставить `tcart.promocode`
+           в undefined.
+       Якщо в слоті опинився не наш код — покупець ввів справжній промокод,
+       і тоді відступаємо: знижка одна, і обрав її він. */
+    function guard() {
+      if (!cartOpen()) return;
+      render();
+      if (!hold) return;
+
+      var pc = window.tcart && window.tcart.promocode;
+      if (pc && pc.promocode && pc.promocode !== hold.code) {
+        hold = null;
+        lsSave(null);
+        view = "idle";
+        setNote("Бонуси скасовано — застосовано промокод.", false);
+        render();
+        return;
+      }
+      if (!pc || pc.promocode !== hold.code || Number(pc.discountsum) !== hold.amount) {
+        applyHold();
+      }
+    }
+
+    function boot() {
+      if (!enabled()) return;
+      hold = lsLoad();
+      if (hold) view = "applied";
+      setInterval(guard, 500);
+    }
+
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", boot);
+    } else {
+      boot();
+    }
+  } catch (e) {
+    if (window.console && console.warn) console.warn("[bonus]", e);
+  }
+})();
