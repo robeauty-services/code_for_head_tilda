@@ -2431,6 +2431,23 @@ document.addEventListener("DOMContentLoaded", function () {
       redrawCart();
     }
 
+    /* Повідомляє сервер, що резерв більше не потрібен — інакше бали лишались
+       зарезервованими ще 45 хвилин, і повторна спроба отримувала «немає
+       бонусів». keepalive — щоб запит долетів, навіть якщо вкладку
+       закривають. Відповідь не чекаємо: якщо запит загубиться, новий
+       підтверджений код однаково замінить старий резерв. */
+    function releaseOnServer(h) {
+      if (!h || !h.code) return;
+      try {
+        fetch(API + "/cancel", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ref: h.code }),
+          keepalive: true,
+        }).catch(function () {});
+      } catch (e) {}
+    }
+
     function clearHold() {
       hold = null;
       lsSave(null);
@@ -2747,6 +2764,7 @@ document.addEventListener("DOMContentLoaded", function () {
       if (action === "send" || action === "resend") requestCode();
       else if (action === "confirm") confirmCode();
       else if (action === "cancel") {
+        releaseOnServer(hold);
         view = "idle";
         setNote("");
         clearHold();
@@ -2768,6 +2786,7 @@ document.addEventListener("DOMContentLoaded", function () {
 
       var pc = window.tcart && window.tcart.promocode;
       if (pc && pc.promocode && pc.promocode !== hold.code) {
+        releaseOnServer(hold);
         hold = null;
         lsSave(null);
         view = "idle";
@@ -2781,6 +2800,7 @@ document.addEventListener("DOMContentLoaded", function () {
          Порожнє поле не рахуємо: Тільда очищає форму при перемальовуванні. */
       var now = phoneDigits();
       if (hold.phone && now && now !== hold.phone) {
+        releaseOnServer(hold);
         hold = null;
         lsSave(null);
         view = "idle";
