@@ -2503,7 +2503,7 @@ document.addEventListener("DOMContentLoaded", function () {
       var s = document.createElement("style");
       s.id = STYLE_ID;
       s.textContent =
-        ".rb-redeem{margin:10px 0 0;font-family:'CenturyGothic',Arial,sans-serif}" +
+        ".rb-redeem{margin:0 0 15px;font-family:'CenturyGothic',Arial,sans-serif}" +
         ".rb-redeem *{box-sizing:border-box}" +
         ".rb-redeem__btn{display:block;width:100%;padding:14px 20px;border:1px solid #2e2e2e;" +
         "border-radius:15px;background:#fff;color:#2e2e2e;font:inherit;font-size:15px;cursor:pointer;" +
@@ -2536,15 +2536,17 @@ document.addEventListener("DOMContentLoaded", function () {
         // «html не змінився» лишила б його порожнім назавжди.
         lastHtml = null;
       }
-      /* Місце перевіряємо на кожному такті, а не лише при створенні:
+      /* Окремим рядком форми над полем промокоду: перед його
+         `.t-input-group`, а не всередині, щоб примітка «*промокоди дійсні…»
+         лишалась під своїм полем, а відступи були як між полями (15px).
+         Місце перевіряємо на кожному такті, а не лише при створенні:
          `t_input_promocode_init` переносить поле промокоду у форму вже
-         після того, як ми вставились, і блок лишався нагорі кошика, над
-         товарами. Після примітки «*промокоди дійсні…», якщо вона є, —
-         щоб примітка лишалась під своїм полем. Переносимо тільки коли
-         стоїмо не там, тож фокус у полі коду не збивається. */
-      var anchor = inCart("#custom-promo-note") || wrap;
-      if (anchor.nextSibling !== el) {
-        anchor.parentNode.insertBefore(el, anchor.nextSibling);
+         після того, як ми вставились, і без цього блок лишався нагорі
+         кошика, над товарами. Переносимо тільки коли стоїмо не там, тож
+         фокус у полі коду не збивається. */
+      var anchor = (wrap.closest && wrap.closest(".t-input-group")) || wrap;
+      if (anchor.previousSibling !== el) {
+        anchor.parentNode.insertBefore(el, anchor);
       }
       return el;
     }
@@ -2576,7 +2578,7 @@ document.addEventListener("DOMContentLoaded", function () {
         html =
           '<div class="rb-redeem__row">' +
           '<input class="rb-redeem__input" data-rbr="code" inputmode="numeric" ' +
-          'autocomplete="one-time-code" maxlength="6" placeholder="Код з Viber або SMS">' +
+          'autocomplete="one-time-code" maxlength="6" placeholder="Код із повідомлення">' +
           '<button type="button" class="rb-redeem__btn rb-redeem__btn--primary" data-rbr="confirm"' +
           (busy ? " disabled" : "") +
           ">Підтвердити</button></div>" +
@@ -2677,7 +2679,7 @@ document.addEventListener("DOMContentLoaded", function () {
             return;
           }
           view = "code";
-          setNote("Код надіслано у Viber або SMS.", false);
+          setNote("Код надіслано на ваш номер.", false);
           startResendCountdown();
           render();
         })
