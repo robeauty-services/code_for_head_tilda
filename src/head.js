@@ -2350,19 +2350,52 @@ document.addEventListener("DOMContentLoaded", function () {
     var hold = null;
     var timer = null;
     var resendLeft = 0;
+    /* Сервер тримає резерв 45 хвилин; тут на хвилину менше, щоб кошик
+       ніколи не показував знижку за резервом, якого вже немає. */
+    var HOLD_MS = 44 * 60 * 1000;
+    /* Сума кошика нижче 1500 ₴ (або половина замало) — бонуси не діють, але
+       резерв не знімаємо: покупець міг прибрати товар на мить. */
+    var suspended = false;
+
+    function num(v) {
+      var n = parseFloat(String(v == null ? "" : v).replace(/\s/g, "").replace(",", "."));
+      return isFinite(n) ? n : 0;
+    }
+    function round2(n) {
+      return Math.round(n * 100) / 100;
+    }
 
     function lsLoad() {
       try {
         var raw = localStorage.getItem(LS_KEY);
         if (!raw) return null;
         var v = JSON.parse(raw);
-        // Резерви з 1.0.10 і раніше мали код BONUS-<id>, який сервер більше
-        // не приймає — такий просто забуваємо.
-        return v && v.id && v.amount > 0 && /^BONUS-[0-9A-Z]{12}$/.test(v.code) ? v : null;
+        // Резерви з 1.0.10 і раніше мали код BONUS-<id>, а до 1.0.14 — не
+        // мали строку дії; такі просто забуваємо.
+        if (!(v && v.id && v.amount > 0 && /^BONUS-[0-9A-Z]{12}$/.test(v.code))) return null;
+        if (!v.expiresAt || v.expiresAt < Date.now()) return null;
+        // Замовлення з цим резервом уже пішло, і Тільда очистила кошик —
+        // резерв належить замовленню, у новому кошику його не показуємо.
+        if (v.submitted && storedCartEmpty()) return null;
+        return v;
       } catch (e) {
         return null;
       }
     }
+    function storedCartEmpty() {
+      try {
+        var c = JSON.parse(localStorage.getItem("tcart") || "null");
+        if (!c || !c.products) return true;
+        for (var i = 0; i < c.products.length; i++) {
+          var p = c.products[i];
+          if (p && p.deleted !== "yes" && p.name) return false;
+        }
+        return true;
+      } catch (e) {
+        return false;
+      }
+    }
+
     function lsSave(v) {
       try {
         if (v) localStorage.setItem(LS_KEY, JSON.stringify(v));
@@ -2422,13 +2455,222 @@ document.addEventListener("DOMContentLoaded", function () {
       call("tcart__reDrawCartIcon");
     }
 
+    /* Тільда не приймає незнайомий промокод — її сервер викидає його і
+       рахує суму заново з цін товарів. Ціни товарів він бере з браузера
+       (так працюють ціни наборів), тож бонус потрапляє в замовлення як
+       знижені ціни позицій у момент оформлення (див. checkoutHook).
+
+       Розкладаємо цілими гривнями, від найдорожчої позиції, не нижче
+       1 ₴ за одиницю. Позиції на вагу (portion) і подарунки по 1 ₴ не
+       чіпаємо. Якщо точно розкласти не виходить (усі позиції по 2+ шт.),
+       знижка буде на кілька гривень меншою — і саме її показуємо, щоб
+       кошик і оплата сходились до копійки. */
+    function cuttableLines(products) {
+      var out = [];
+      for (var i = 0; i < (products || []).length; i++) {
+        var p = products[i];
+        if (!p || p.deleted === "yes" || p.portion) continue;
+        var q = parseInt(p.quantity, 10) || 0;
+        var price = num(p.price);
+        if (q <= 0 || price <= 1) continue;
+        out.push({ p: p, q: q, price: price });
+      }
+      out.sort(function (a, b) {
+        return b.price * b.q - a.price * a.q;
+      });
+      return out;
+    }
+    function plan(products, want) {
+      var target = Math.max(0, Math.floor(want));
+      var rem = target;
+      var cuts = [];
+      var ls = cuttableLines(products);
+      for (var i = 0; i < ls.length && rem > 0; i++) {
+        var unit = Math.min(Math.floor(ls[i].price - 1), Math.floor(rem / ls[i].q));
+        if (unit > 0) {
+          cuts.push({ p: ls[i].p, unit: unit });
+          rem -= unit * ls[i].q;
+        }
+      }
+      return { applied: target - rem, cuts: cuts };
+    }
+    function productsTotal(products) {
+      var t = 0;
+      for (var i = 0; i < (products || []).length; i++) {
+        var p = products[i];
+        if (!p || p.deleted === "yes") continue;
+        t += num(p.amount) || num(p.price) * (parseInt(p.quantity, 10) || 0);
+      }
+      return round2(t);
+    }
+    /* Ті самі правила, що на сервері, але від поточного кошика: від 1500 ₴ і
+       не більше половини. Повертає, скільки реально спишеться, або 0. */
+    function wanted(products) {
+      if (!hold) return 0;
+      var prod = productsTotal(products);
+      if (prod < MIN_ORDER) return 0;
+      return plan(products, Math.min(hold.amount, Math.floor(prod * 0.5))).applied;
+    }
+
+    function dropDisplayedDiscount() {
+      var pc = window.tcart && window.tcart.promocode;
+      if (pc && hold && pc.promocode === hold.code) {
+        try {
+          delete window.tcart.promocode;
+        } catch (e) {
+          window.tcart.promocode = undefined;
+        }
+        redrawCart();
+      }
+    }
+
+    /* Показує знижку в кошику через `tcart.promocode` — тільки для показу:
+       «Сума знижки» і «Сума до оплати» Тільда малює сама. До сервера
+       Тільди цей промокод не доходить (див. checkoutHook). */
     function applyHold() {
       if (!hold || !window.tcart) return;
-      window.tcart.promocode = {
-        promocode: hold.code,
-        discountsum: hold.amount,
-      };
+      var applied = wanted(window.tcart.products);
+      if (applied <= 0) {
+        if (!suspended) {
+          suspended = true;
+          dropDisplayedDiscount();
+          render();
+        }
+        return;
+      }
+      suspended = false;
+      hold.applied = applied;
+      window.tcart.promocode = { promocode: hold.code, discountsum: applied };
       redrawCart();
+      render();
+    }
+
+    /* ---------- оформлення: знижка йде в ціни позицій ---------- */
+
+    var HIDDEN_FIELDS = ["bonus_ref", "bonus_applied"];
+    function formEl(f) {
+      return f && f.nodeType === 1 ? f : f && f[0] && f[0].nodeType === 1 ? f[0] : null;
+    }
+    function setHiddenFields(form, values) {
+      for (var i = 0; i < HIDDEN_FIELDS.length; i++) {
+        var name = HIDDEN_FIELDS[i];
+        var el = form.querySelector('input[name="' + name + '"]');
+        if (values && values[name] != null) {
+          if (!el) {
+            el = document.createElement("input");
+            el.type = "hidden";
+            el.name = name;
+            form.appendChild(el);
+          }
+          el.value = String(values[name]);
+        } else if (el && el.parentNode) {
+          el.parentNode.removeChild(el);
+        }
+      }
+    }
+
+    /* Викликається одразу після того, як Тільда зібрала
+       `tildaForm.tildapayment` — копію кошика, яку вона серіалізує й шле на
+       свій сервер. Міняємо саме цю копію, а не `tcart`: кошик, скрипт наборів
+       і аналітика до останньої миті бачать звичайні ціни, а Тільда між збиранням
+       і відправкою `tcart` більше не читає. */
+    function applyToPayment(form) {
+      form = formEl(form);
+      if (!form) return;
+      setHiddenFields(form, null);
+
+      var tp = window.tildaForm && window.tildaForm.tildapayment;
+      if (!hold || suspended || !tp || !tp.products || !tp.products.length) return;
+
+      var prodBefore = productsTotal(tp.products);
+      if (prodBefore < MIN_ORDER) return;
+      var pl = plan(tp.products, Math.min(hold.amount, Math.floor(prodBefore * 0.5)));
+      if (pl.applied <= 0) return;
+
+      // Усе, що в сумі до оплати понад товари (доставка), — до змін.
+      var extra = round2(num(tp.amount) - (prodBefore - num(tp.discount)));
+
+      for (var i = 0; i < pl.cuts.length; i++) {
+        var p = pl.cuts[i].p;
+        var q = parseInt(p.quantity, 10) || 0;
+        p.price = round2(num(p.price) - pl.cuts[i].unit);
+        p.amount = round2(p.price * q);
+      }
+      var prodAfter = round2(prodBefore - pl.applied);
+      tp.prodamount = prodAfter;
+      tp.amount = round2(prodAfter + Math.max(0, extra));
+      // Наш показовий промокод сервер Тільди однаково викине.
+      delete tp.promocode;
+      delete tp.discount;
+      delete tp.prodamount_withdiscount;
+      delete tp.amount_withoutdiscount;
+
+      setHiddenFields(form, { bonus_ref: hold.code, bonus_applied: pl.applied });
+      hold.submitted = true;
+      lsSave(hold);
+    }
+
+    function markWrapped(fn) {
+      fn.__rbRedeem = true;
+      return fn;
+    }
+    function wrapPayment(orig) {
+      return markWrapped(function () {
+        var r = orig.apply(this, arguments);
+        try {
+          applyToPayment(arguments[0]);
+        } catch (e) {
+          if (window.console && console.warn) console.warn("[bonus] checkout", e);
+        }
+        return r;
+      });
+    }
+    /* `addPaymentInfoToForm` живе в tilda-forms-payments, який Тільда
+       підвантажує ліниво — його може ще не бути, коли покупець натискає
+       «Оформити». Тому, якщо функції ще немає, ловимо саме присвоєння. */
+    function checkoutHook() {
+      var tf = window.tildaForm;
+      if (!tf) return;
+      /* Перевіряємо саму властивість, а не прапорець «уже встановлено»:
+         якщо Тільда перестворить tildaForm або перезапише властивість,
+         пастку треба поставити знову, інакше оплата піде за повною ціною. */
+      var d = Object.getOwnPropertyDescriptor(tf, "addPaymentInfoToForm");
+      var cur = tf.addPaymentInfoToForm;
+      if (typeof cur === "function") {
+        if (!cur.__rbRedeem) tf.addPaymentInfoToForm = wrapPayment(cur);
+      } else if (!(d && d.get && d.get.__rbRedeem)) {
+        var held = cur;
+        try {
+          Object.defineProperty(tf, "addPaymentInfoToForm", {
+            configurable: true,
+            enumerable: true,
+            get: markWrapped(function () {
+              return held;
+            }),
+            set: function (fn) {
+              held = typeof fn === "function" && !fn.__rbRedeem ? wrapPayment(fn) : fn;
+            },
+          });
+        } catch (e) {}
+      }
+      /* Тільда кличе clearTCart, коли замовлення прийнято. Резерв тепер
+         належить замовленню — у кошику його більше не показуємо (і на
+         сервері не скасовуємо). */
+      var clr = tf.clearTCart;
+      if (typeof clr === "function" && !clr.__rbRedeem) {
+        tf.clearTCart = markWrapped(function () {
+          try {
+            if (hold && hold.submitted) {
+              hold = null;
+              lsSave(null);
+              view = "idle";
+              suspended = false;
+              setNote("");
+            }
+          } catch (e) {}
+          return clr.apply(this, arguments);
+        });
+      }
     }
 
     /* Повідомляє сервер, що резерв більше не потрібен — інакше бали лишались
@@ -2450,7 +2692,10 @@ document.addEventListener("DOMContentLoaded", function () {
 
     function clearHold() {
       hold = null;
+      suspended = false;
       lsSave(null);
+      var f = inCart("form");
+      if (f) setHiddenFields(f, null);
       if (window.tcart && window.tcart.promocode) {
         try {
           delete window.tcart.promocode;
@@ -2587,10 +2832,17 @@ document.addEventListener("DOMContentLoaded", function () {
       var html = "";
       if (hold) {
         html =
-          '<div class="rb-redeem__applied"><span>Списано ' +
-          hold.amount +
-          " ₴ бонусами</span>" +
-          '<button type="button" class="rb-redeem__link" data-rbr="cancel">Скасувати</button></div>';
+          '<div class="rb-redeem__applied"><span>' +
+          (suspended
+            ? "Бонуси збережено"
+            : "Списано " + (hold.applied || hold.amount) + " ₴ бонусами") +
+          "</span>" +
+          '<button type="button" class="rb-redeem__link" data-rbr="cancel">Скасувати</button></div>' +
+          (suspended
+            ? '<div class="rb-redeem__note">Бонуси діють від суми замовлення ' +
+              MIN_ORDER +
+              " ₴ і покривають до 50% — додайте товари, і знижка повернеться.</div>"
+            : "");
       } else if (view === "code") {
         html =
           '<div class="rb-redeem__row">' +
@@ -2741,6 +2993,7 @@ document.addEventListener("DOMContentLoaded", function () {
             amount: res.amount,
             code: "BONUS-" + res.ref,
             phone: phoneDigits(),
+            expiresAt: Date.now() + HOLD_MS,
           };
           lsSave(hold);
           view = "applied";
@@ -2780,7 +3033,16 @@ document.addEventListener("DOMContentLoaded", function () {
        Якщо в слоті опинився не наш код — покупець ввів справжній промокод,
        і тоді відступаємо: знижка одна, і обрав її він. */
     function guard() {
+      checkoutHook();
       if (!cartOpen()) return;
+      if (hold && hold.expiresAt < Date.now()) {
+        hold = null;
+        lsSave(null);
+        view = "idle";
+        suspended = false;
+        dropDisplayedDiscount();
+        setNote("Час резерву минув — підтвердьте номер ще раз.", false);
+      }
       render();
       if (!hold) return;
 
@@ -2817,7 +3079,10 @@ document.addEventListener("DOMContentLoaded", function () {
         return;
       }
 
-      if (!pc || pc.promocode !== hold.code || Number(pc.discountsum) !== hold.amount) {
+      var applied = wanted(window.tcart && window.tcart.products);
+      if (applied <= 0) {
+        if (!suspended) applyHold();
+      } else if (suspended || !pc || pc.promocode !== hold.code || Number(pc.discountsum) !== applied) {
         applyHold();
       }
     }
@@ -2825,7 +3090,9 @@ document.addEventListener("DOMContentLoaded", function () {
     function boot() {
       if (!enabled()) return;
       hold = lsLoad();
+      if (!hold) lsSave(null);
       if (hold) view = "applied";
+      checkoutHook();
       setInterval(guard, 500);
     }
 
