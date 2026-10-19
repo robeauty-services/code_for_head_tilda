@@ -2369,9 +2369,21 @@ document.addEventListener("DOMContentLoaded", function () {
     function cartWin() {
       return document.querySelector(".t706__cartwin");
     }
+    /* Не через offsetParent: вікно кошика `position: fixed`, а в fixed-елемента
+       offsetParent завжди null — така перевірка вважала кошик закритим
+       назавжди, і блок не з'являвся ніколи. Тільда показує вікно класом
+       `t706__cartwin_showed`; computed display — запасний варіант. */
     function cartOpen() {
       var w = cartWin();
-      return !!w && w.style.display !== "none" && w.offsetParent !== null;
+      if (!w) return false;
+      if (w.classList && w.classList.contains("t706__cartwin_showed")) return true;
+      return window.getComputedStyle(w).display !== "none";
+    }
+    /* Усі пошуки — всередині вікна кошика: на сторінці «дякуємо» є ще одна
+       форма кошика, і document.querySelector міг би взяти її поле. */
+    function inCart(selector) {
+      var w = cartWin();
+      return w ? w.querySelector(selector) : null;
     }
     function prodAmount() {
       var c = window.tcart;
@@ -2428,8 +2440,8 @@ document.addEventListener("DOMContentLoaded", function () {
        застосованих бонусах блокуємо — інакше Тільда просто перезапише нашу
        знижку своєю і покупець побачить не те, що очікував. */
     function syncPromoInput() {
-      var input = document.querySelector(".t-inputpromocode");
-      var btn = document.querySelector(".t-inputpromocode__btn");
+      var input = inCart(".t-inputpromocode");
+      var btn = inCart(".t-inputpromocode__btn");
       var lock = !!hold;
       if (input) {
         input.disabled = lock;
@@ -2471,45 +2483,60 @@ document.addEventListener("DOMContentLoaded", function () {
 
     /* ---------- інтерфейс ---------- */
 
-    var STYLE_ID = "robeauty-bonus-style";
+    /* Префікс `rb-redeem`, не `rb-bonus`: `rb-bonus` уже зайнятий шкалою
+       «До подарунка … залишилось» з іншого скрипту сайту. З тим самим
+       класом ми знаходили її блок замість свого, писали в нього і
+       перевизначали її стилі. Так само `data-rbr`, бо `data-rb` теж
+       уже є на сторінці. */
+    var STYLE_ID = "robeauty-redeem-style";
     function ensureStyle() {
       if (document.getElementById(STYLE_ID)) return;
       var s = document.createElement("style");
       s.id = STYLE_ID;
       s.textContent =
-        ".rb-bonus{margin:10px 0 0;font-family:inherit}" +
-        ".rb-bonus__btn{display:block;width:100%;padding:14px 20px;border:1px solid #2e2e2e;" +
+        ".rb-redeem{margin:10px 0 0;font-family:'CenturyGothic',Arial,sans-serif}" +
+        ".rb-redeem *{box-sizing:border-box}" +
+        ".rb-redeem__btn{display:block;width:100%;padding:14px 20px;border:1px solid #2e2e2e;" +
         "border-radius:15px;background:#fff;color:#2e2e2e;font:inherit;font-size:15px;cursor:pointer;" +
         "-webkit-appearance:none;appearance:none}" +
-        ".rb-bonus__btn:disabled{opacity:.5;cursor:default}" +
-        ".rb-bonus__btn--primary{background:#2e2e2e;color:#fff}" +
-        ".rb-bonus__row{display:flex;gap:8px;margin-top:8px}" +
-        ".rb-bonus__row .rb-bonus__btn{width:auto;flex:0 0 auto;padding:14px 18px}" +
-        ".rb-bonus__input{flex:1 1 auto;min-width:0;padding:14px 20px;border:1px solid #e3e3e3;" +
+        ".rb-redeem__btn:disabled{opacity:.5;cursor:default}" +
+        ".rb-redeem__btn--primary{background:#2e2e2e;color:#fff}" +
+        ".rb-redeem__row{display:flex;gap:8px;margin-top:8px}" +
+        ".rb-redeem__row .rb-redeem__btn{width:auto;flex:0 0 auto;padding:14px 18px}" +
+        ".rb-redeem__input{flex:1 1 auto;min-width:0;padding:14px 20px;border:1px solid #2e2e2e;" +
         "border-radius:15px;font:inherit;font-size:15px;-webkit-appearance:none;appearance:none}" +
-        ".rb-bonus__note{margin:6px 2px 0;font-size:12px;line-height:1.35;color:#8c8c8c}" +
-        ".rb-bonus__note--err{color:#d0021b}" +
-        ".rb-bonus__applied{display:flex;align-items:center;justify-content:space-between;gap:10px;" +
+        ".rb-redeem__note{margin:6px 2px 0;font-size:12px;line-height:1.35;color:#8c8c8c}" +
+        ".rb-redeem__note--err{color:#d0021b}" +
+        ".rb-redeem__applied{display:flex;align-items:center;justify-content:space-between;gap:10px;" +
         "padding:13px 18px;border:1px solid #2e2e2e;border-radius:15px;font-size:15px}" +
-        ".rb-bonus__link{background:none;border:0;padding:0;font:inherit;font-size:13px;" +
+        ".rb-redeem__link{background:none;border:0;padding:0;font:inherit;font-size:13px;" +
         "color:#8c8c8c;text-decoration:underline;cursor:pointer}";
       document.head.appendChild(s);
     }
 
     function mount() {
-      var wrap = document.querySelector(".t-inputpromocode__wrapper");
+      var wrap = inCart(".t-inputpromocode__wrapper");
       if (!wrap) return null;
-      var el = document.querySelector(".rb-bonus");
-      if (el) return el;
-      ensureStyle();
-      el = document.createElement("div");
-      el.className = "rb-bonus";
-      // Тільда перебудовує вікно кошика при кожному відкритті, тож блок тут
-      // новий і порожній — забуваємо попередню розмітку, інакше перевірка
-      // «html не змінився» лишила б його порожнім назавжди.
-      lastHtml = null;
-      // Після блоку промокоду: для покупця це одна й та сама річ — «знижка».
-      wrap.parentNode.insertBefore(el, wrap.nextSibling);
+      var el = inCart(".rb-redeem");
+      if (!el) {
+        ensureStyle();
+        el = document.createElement("div");
+        el.className = "rb-redeem";
+        // Тільда перебудовує вікно кошика при кожному відкритті, тож блок тут
+        // новий і порожній — забуваємо попередню розмітку, інакше перевірка
+        // «html не змінився» лишила б його порожнім назавжди.
+        lastHtml = null;
+      }
+      /* Місце перевіряємо на кожному такті, а не лише при створенні:
+         `t_input_promocode_init` переносить поле промокоду у форму вже
+         після того, як ми вставились, і блок лишався нагорі кошика, над
+         товарами. Після примітки «*промокоди дійсні…», якщо вона є, —
+         щоб примітка лишалась під своїм полем. Переносимо тільки коли
+         стоїмо не там, тож фокус у полі коду не збивається. */
+      var anchor = inCart("#custom-promo-note") || wrap;
+      if (anchor.nextSibling !== el) {
+        anchor.parentNode.insertBefore(el, anchor.nextSibling);
+      }
       return el;
     }
 
@@ -2532,60 +2559,69 @@ document.addEventListener("DOMContentLoaded", function () {
       var html = "";
       if (hold) {
         html =
-          '<div class="rb-bonus__applied"><span>Списано ' +
+          '<div class="rb-redeem__applied"><span>Списано ' +
           hold.amount +
           " ₴ бонусами</span>" +
-          '<button type="button" class="rb-bonus__link" data-rb="cancel">Скасувати</button></div>';
+          '<button type="button" class="rb-redeem__link" data-rbr="cancel">Скасувати</button></div>';
       } else if (view === "code") {
         html =
-          '<div class="rb-bonus__row">' +
-          '<input class="rb-bonus__input" data-rb="code" inputmode="numeric" ' +
+          '<div class="rb-redeem__row">' +
+          '<input class="rb-redeem__input" data-rbr="code" inputmode="numeric" ' +
           'autocomplete="one-time-code" maxlength="6" placeholder="Код з Viber або SMS">' +
-          '<button type="button" class="rb-bonus__btn rb-bonus__btn--primary" data-rb="confirm"' +
+          '<button type="button" class="rb-redeem__btn rb-redeem__btn--primary" data-rbr="confirm"' +
           (busy ? " disabled" : "") +
           ">Підтвердити</button></div>" +
-          '<div class="rb-bonus__note">' +
+          '<div class="rb-redeem__note">' +
           (resendLeft > 0
-            ? "Надіслати код ще раз можна за " + resendLeft + " с"
-            : '<button type="button" class="rb-bonus__link" data-rb="resend">Надіслати код ще раз</button>') +
+            ? 'Надіслати код ще раз можна за <span data-rbr-left></span> с'
+            : '<button type="button" class="rb-redeem__link" data-rbr="resend">Надіслати код ще раз</button>') +
           "</div>";
       } else {
         html =
-          '<button type="button" class="rb-bonus__btn" data-rb="send"' +
+          '<button type="button" class="rb-redeem__btn" data-rbr="send"' +
           (busy ? " disabled" : "") +
           ">" +
           (busy ? "Надсилаємо…" : "Списати бонуси") +
           "</button>" +
-          '<div class="rb-bonus__note">Бонуси діють від суми замовлення ' +
+          '<div class="rb-redeem__note">Бонуси діють від суми замовлення ' +
           MIN_ORDER +
           " ₴ і покривають до 50% замовлення.</div>";
       }
 
       if (note) {
         html +=
-          '<div class="rb-bonus__note' +
-          (noteErr ? " rb-bonus__note--err" : "") +
+          '<div class="rb-redeem__note' +
+          (noteErr ? " rb-redeem__note--err" : "") +
           '">' +
           note +
           "</div>";
       }
 
-      /* Сторож смикає render() двічі на секунду, а зворотний відлік міняє
-         текст щосекунди — без цієї перевірки ми б переписували innerHTML
-         під покупцем і стирали код, який він саме набирає. Тому: пишемо
-         тільки коли розмітка справді змінилась, і переносимо введене
-         значення та фокус у нову. */
-      if (html === lastHtml) return;
-      lastHtml = html;
+      /* Сторож смикає render() двічі на секунду. Розмітку переписуємо лише
+         коли вона справді змінилась — і зворотний відлік у неї навмисно не
+         входить: число оновлюється окремо, нижче. Інакше блок
+         перебудовувався б щосекунди протягом хвилини, саме коли покупець
+         набирає код: натискання «Підтвердити», що припало на перебудову,
+         губилось, а на телефоні заміна поля у фокусі ховає клавіатуру. */
+      if (html !== lastHtml) {
+        lastHtml = html;
+        replaceHtml(el, html);
+      }
+      var left = el.querySelector("[data-rbr-left]");
+      if (left) left.textContent = String(resendLeft);
+    }
 
-      var prev = el.querySelector('[data-rb="code"]');
+    /* Переносить введене і фокус у нову розмітку — на випадок, коли вона
+       таки змінюється під покупцем (зайнятий/вільний, повідомлення). */
+    function replaceHtml(el, html) {
+      var prev = el.querySelector('[data-rbr="code"]');
       var typed = prev ? prev.value : null;
       var hadFocus = prev && document.activeElement === prev;
 
       el.innerHTML = html;
 
       if (typed !== null) {
-        var next = el.querySelector('[data-rb="code"]');
+        var next = el.querySelector('[data-rbr="code"]');
         if (next) {
           next.value = typed;
           if (hadFocus) {
@@ -2644,7 +2680,7 @@ document.addEventListener("DOMContentLoaded", function () {
     }
 
     function confirmCode() {
-      var el = document.querySelector('[data-rb="code"]');
+      var el = inCart('[data-rbr="code"]');
       var code = el ? String(el.value || "").replace(/\D/g, "") : "";
       if (code.length !== 6) {
         setNote("Введіть 6 цифр коду.", true);
@@ -2688,7 +2724,7 @@ document.addEventListener("DOMContentLoaded", function () {
     document.addEventListener("click", function (e) {
       var t = e.target;
       if (!t || !t.getAttribute) return;
-      var action = t.getAttribute("data-rb");
+      var action = t.getAttribute("data-rbr");
       if (!action) return;
       e.preventDefault();
       if (action === "send" || action === "resend") requestCode();
