@@ -2341,7 +2341,9 @@ document.addEventListener("DOMContentLoaded", function () {
       }
     }
 
-    /* { id: <redemptionId>, amount: <грн>, code: "BONUS-<id>" } або null.
+    /* { id, amount: <грн>, code: "BONUS-<ref>", phone: <цифри номера> } або null.
+       ref — випадковий, його видає сервер лише на правильний код: за
+       порядковим id чужий кошик міг би послатися на чужий резерв.
        Тримаємо і в пам'яті, і в localStorage: `t_cart__applyPageSettings`
        обнуляє `tcart.promocode` на кожній ініціалізації кошика, тож знижку
        треба вміти наклеїти назад, а не поставити один раз. */
@@ -2354,7 +2356,9 @@ document.addEventListener("DOMContentLoaded", function () {
         var raw = localStorage.getItem(LS_KEY);
         if (!raw) return null;
         var v = JSON.parse(raw);
-        return v && v.id && v.amount > 0 ? v : null;
+        // Резерви з 1.0.10 і раніше мали код BONUS-<id>, який сервер більше
+        // не приймає — такий просто забуваємо.
+        return v && v.id && v.amount > 0 && /^BONUS-[0-9A-Z]{12}$/.test(v.code) ? v : null;
       } catch (e) {
         return null;
       }
@@ -2393,6 +2397,11 @@ document.addEventListener("DOMContentLoaded", function () {
       var w = cartWin();
       var el = w && (w.querySelector('input[name="phone"]') || w.querySelector('input[type="tel"]'));
       return el ? String(el.value || "").trim() : "";
+    }
+
+    /* Лише цифри: маска показує той самий номер то з дужками, то без. */
+    function phoneDigits() {
+      return phoneValue().replace(/\D/g, "");
     }
 
     function call(name) {
@@ -2703,10 +2712,16 @@ document.addEventListener("DOMContentLoaded", function () {
             render();
             return;
           }
+          if (!res.ref) {
+            setNote(refusalText(), true);
+            render();
+            return;
+          }
           hold = {
             id: res.redemptionId,
             amount: res.amount,
-            code: "BONUS-" + res.redemptionId,
+            code: "BONUS-" + res.ref,
+            phone: phoneDigits(),
           };
           lsSave(hold);
           view = "applied";
@@ -2758,6 +2773,28 @@ document.addEventListener("DOMContentLoaded", function () {
         render();
         return;
       }
+      /* Бонуси підтверджено для конкретного номера. Якщо номер у формі
+         змінили, замовлення піде на інший — і сервер усе одно не спише за
+         нього бали, а знижку покупець уже бачив. Тож знімаємо одразу.
+         Порожнє поле не рахуємо: Тільда очищає форму при перемальовуванні. */
+      var now = phoneDigits();
+      if (hold.phone && now && now !== hold.phone) {
+        hold = null;
+        lsSave(null);
+        view = "idle";
+        if (window.tcart && window.tcart.promocode) {
+          try {
+            delete window.tcart.promocode;
+          } catch (e) {
+            window.tcart.promocode = undefined;
+          }
+          redrawCart();
+        }
+        setNote("Номер змінено — бонуси скасовано. Підтвердьте новий номер.", false);
+        render();
+        return;
+      }
+
       if (!pc || pc.promocode !== hold.code || Number(pc.discountsum) !== hold.amount) {
         applyHold();
       }
