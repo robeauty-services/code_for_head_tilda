@@ -2581,6 +2581,10 @@ document.addEventListener("DOMContentLoaded", function () {
 
       var tp = window.tildaForm && window.tildaForm.tildapayment;
       if (!hold || suspended || !tp || !tp.products || !tp.products.length) return;
+      /* Сторож знімає прострочений резерв двічі на секунду, але вкладка у фоні
+         пригальмовує таймери — тож перевіряємо ще раз у сам момент оформлення,
+         щоб замовлення не пішло зі знижкою за резервом, якого вже немає. */
+      if (!hold.expiresAt || hold.expiresAt < Date.now()) return;
 
       var prodBefore = productsTotal(tp.products);
       if (prodBefore < MIN_ORDER) return;
@@ -2713,7 +2717,8 @@ document.addEventListener("DOMContentLoaded", function () {
     function syncPromoInput() {
       var input = inCart(".t-inputpromocode");
       var btn = inCart(".t-inputpromocode__btn");
-      var lock = !!hold;
+      // Поки бонуси на паузі (кошик замалий), знижки немає — промокод можна.
+      var lock = !!hold && !suspended;
       if (input) {
         input.disabled = lock;
         input.style.opacity = lock ? "0.5" : "";
@@ -2744,7 +2749,7 @@ document.addEventListener("DOMContentLoaded", function () {
       rate_limited: "Забагато спроб. Спробуйте пізніше.",
       send_failed: "Не вдалося надіслати код. Спробуйте ще раз.",
       bad_code: "Невірний код.",
-      expired: "Код прострочено — запросіть новий.",
+      expired: "Термін дії коду закінчився — запросіть новий.",
       burned: "Забагато невірних спроб. Запросіть новий код.",
       not_found: "Спочатку запросіть код.",
     };
@@ -2776,7 +2781,9 @@ document.addEventListener("DOMContentLoaded", function () {
         ".rb-redeem__row .rb-redeem__btn{width:auto;flex:0 0 auto;padding:14px 18px}" +
         ".rb-redeem__input{flex:1 1 auto;min-width:0;padding:14px 20px;border:1px solid #2e2e2e;" +
         "border-radius:15px;font:inherit;font-size:15px;-webkit-appearance:none;appearance:none}" +
-        ".rb-redeem__note{margin:6px 2px 0;font-size:12px;line-height:1.35;color:#8c8c8c}" +
+        /* Як примітка до промокоду («*промокоди дійсні…»): чорна, по центру,
+           12px, 10px зверху — щоб тексти під полями не різнились. */
+        ".rb-redeem__note{margin:10px 0 0;font-size:12px;line-height:normal;color:#000;text-align:center}" +
         ".rb-redeem__note--err{color:#d0021b}" +
         ".rb-redeem__applied{display:flex;align-items:center;justify-content:space-between;gap:10px;" +
         "padding:13px 18px;border:1px solid #2e2e2e;border-radius:15px;font-size:15px}" +
@@ -2824,6 +2831,16 @@ document.addEventListener("DOMContentLoaded", function () {
       noteErr = !!isErr;
     }
 
+    /* Підказка, коли код підтверджено, але кошик зараз не підходить: скільки
+       саме додати. Сума рахується від поточного кошика, тож зменшується, поки
+       покупець додає товари, і блок сам повертає знижку, щойно вистачить. */
+    function pausedHint() {
+      var c = window.tcart;
+      var gap = Math.ceil(MIN_ORDER - productsTotal(c && c.products));
+      var base = "*бонуси діють від суми замовлення <strong>" + MIN_ORDER + " ₴</strong>";
+      return gap > 0 ? base + " — додайте товарів ще на <strong>" + gap + " ₴</strong>" : base;
+    }
+
     function render() {
       var el = mount();
       if (!el) return;
@@ -2834,15 +2851,11 @@ document.addEventListener("DOMContentLoaded", function () {
         html =
           '<div class="rb-redeem__applied"><span>' +
           (suspended
-            ? "Бонуси збережено"
+            ? "Бонуси поки не застосовано"
             : "Списано " + (hold.applied || hold.amount) + " ₴ бонусами") +
           "</span>" +
           '<button type="button" class="rb-redeem__link" data-rbr="cancel">Скасувати</button></div>' +
-          (suspended
-            ? '<div class="rb-redeem__note">Бонуси діють від суми замовлення ' +
-              MIN_ORDER +
-              " ₴ і покривають до 50% — додайте товари, і знижка повернеться.</div>"
-            : "");
+          (suspended ? '<div class="rb-redeem__note">' + pausedHint() + "</div>" : "");
       } else if (view === "code") {
         html =
           '<div class="rb-redeem__row">' +
@@ -2861,11 +2874,11 @@ document.addEventListener("DOMContentLoaded", function () {
           '<button type="button" class="rb-redeem__btn" data-rbr="send"' +
           (busy ? " disabled" : "") +
           ">" +
-          (busy ? "Надсилаємо…" : "Списати бонуси") +
+          (busy ? "Надсилаємо…" : "Використати бонуси") +
           "</button>" +
-          '<div class="rb-redeem__note">Бонуси діють від суми замовлення ' +
+          '<div class="rb-redeem__note">*бонуси діють від суми замовлення <strong>' +
           MIN_ORDER +
-          " ₴ і покривають до 50% замовлення.</div>";
+          " ₴</strong> і покривають до <strong>50%</strong> замовлення</div>";
       }
 
       if (note) {
