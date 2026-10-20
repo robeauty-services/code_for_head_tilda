@@ -2606,6 +2606,30 @@ document.addEventListener("DOMContentLoaded", function () {
       });
     }
 
+    /* Чи списання взагалі ввімкнене (на розпродаж його вимикають на сервері).
+       Питаємо, коли кошик відкрили, не частіше ніж раз на хвилину. Вимкнене —
+       показуємо «тимчасово недоступне» одразу, а не після того, як покупець
+       ввів номер. Збій зв'язку вважаємо «ввімкнено»: сервер усе одно
+       відповість «недоступне» на запит коду. */
+    var available = true;
+    var lastAvailabilityCheck = 0;
+    function availabilityCheck() {
+      if (Date.now() - lastAvailabilityCheck < 60000) return;
+      lastAvailabilityCheck = Date.now();
+      post("/availability", {})
+        .then(function (res) {
+          setAvailable(!(res && res.ok && res.enabled === false));
+        })
+        .catch(function () {});
+    }
+    function setAvailable(v) {
+      if (v === available) return;
+      available = v;
+      if (!v && view === "code") view = "idle";
+      if (!v) setNote("");
+      render();
+    }
+
     /* Перевірка на кнопці «Оформити». Ловимо клік (і submit — на випадок Enter)
        у фазі захоплення на document, тобто раніше за будь-які обробники
        Тільди; притримуємо, питаємо сервер і далі:
@@ -2961,6 +2985,10 @@ document.addEventListener("DOMContentLoaded", function () {
           "</span>" +
           '<button type="button" class="rb-redeem__link" data-rbr="cancel">Скасувати</button></div>' +
           (suspended ? '<div class="rb-redeem__note">' + pausedHint() + "</div>" : "");
+      } else if (!available) {
+        html =
+          '<button type="button" class="rb-redeem__btn" disabled>Використати бонуси</button>' +
+          '<div class="rb-redeem__note">' + REFUSAL_TEXT.disabled + "</div>";
       } else if (view === "code") {
         html =
           '<div class="rb-redeem__row">' +
@@ -3060,6 +3088,11 @@ document.addEventListener("DOMContentLoaded", function () {
       post("/request-code", { phone: phone, cartTotal: prodAmount() })
         .then(function (res) {
           busy = false;
+          if (res && res.refusal === "disabled") {
+            setAvailable(false);
+            render();
+            return;
+          }
           if (!res || !res.ok) {
             setNote(refusalText(res && res.refusal), true);
             render();
@@ -3096,6 +3129,11 @@ document.addEventListener("DOMContentLoaded", function () {
       })
         .then(function (res) {
           busy = false;
+          if (res && res.refusal === "disabled") {
+            setAvailable(false);
+            render();
+            return;
+          }
           if (!res || !res.ok) {
             setNote(refusalText(res && res.refusal), true);
             render();
@@ -3154,7 +3192,10 @@ document.addEventListener("DOMContentLoaded", function () {
     function guard() {
       checkoutHook();
       var open = cartOpen();
-      if (open && !wasOpen) backgroundCheck();
+      if (open && !wasOpen) {
+        backgroundCheck();
+        availabilityCheck();
+      }
       wasOpen = open;
       if (!open) return;
       if (hold && hold.expiresAt < Date.now()) {
@@ -3218,7 +3259,10 @@ document.addEventListener("DOMContentLoaded", function () {
       document.addEventListener("click", interceptCheckout, true);
       document.addEventListener("submit", interceptCheckout, true);
       document.addEventListener("visibilitychange", function () {
-        if (document.visibilityState === "visible" && cartOpen()) backgroundCheck();
+        if (document.visibilityState === "visible" && cartOpen()) {
+          backgroundCheck();
+          availabilityCheck();
+        }
       });
       setInterval(guard, 500);
     }
