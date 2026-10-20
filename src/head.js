@@ -2545,6 +2545,111 @@ document.addEventListener("DOMContentLoaded", function () {
       render();
     }
 
+    /* ---------- перевірка резерву на сервері ---------- */
+
+    /* Чи можна ще витратити цей резерв: живий і жодне замовлення його не
+       забрало. Резерв зникає, коли покупець підтвердив код на іншому
+       пристрої чи вкладці (новий код замінює старий) або вже оформив з ним
+       замовлення. Кошик про це сам не знає — тож питаємо сервер.
+       Відповідь: true / false, або null, якщо перевірити не вдалося. */
+    function checkUsable(h, timeoutMs) {
+      if (!h || !h.code) return Promise.resolve(false);
+      var done = false;
+      return new Promise(function (resolve) {
+        var t = setTimeout(function () {
+          if (!done) {
+            done = true;
+            resolve(null);
+          }
+        }, timeoutMs);
+        post("/status", { ref: h.code })
+          .then(function (res) {
+            if (done) return;
+            done = true;
+            clearTimeout(t);
+            resolve(res && res.ok ? !!res.usable : null);
+          })
+          .catch(function () {
+            if (done) return;
+            done = true;
+            clearTimeout(t);
+            resolve(null);
+          });
+      });
+    }
+
+    /* Резерв уже недійсний: прибираємо знижку, кажемо чому. На сервер нічого
+       не шлемо — там його вже немає. */
+    function dropStaleHold() {
+      dropDisplayedDiscount();
+      hold = null;
+      suspended = false;
+      lsSave(null);
+      var f = inCart("form");
+      if (f) setHiddenFields(f, null);
+      view = "idle";
+      setNote(
+        "Бонуси вже використано або підтверджено на іншому пристрої — підтвердьте ще раз.",
+        true,
+      );
+      render();
+    }
+
+    /* Тиха перевірка: коли кошик відкрили і коли вкладка знову на екрані. */
+    var lastBackgroundCheck = 0;
+    function backgroundCheck() {
+      if (!hold || Date.now() - lastBackgroundCheck < 5000) return;
+      lastBackgroundCheck = Date.now();
+      var h = hold;
+      checkUsable(h, 8000).then(function (usable) {
+        if (usable === false && hold === h) dropStaleHold();
+      });
+    }
+
+    /* Перевірка на кнопці «Оформити». Ловимо клік (і submit — на випадок Enter)
+       у фазі захоплення на document, тобто раніше за будь-які обробники
+       Тільди; притримуємо, питаємо сервер і далі:
+         - резерв живий → повторюємо клік, він проходить як звичайно;
+         - резерв зник → не оформлюємо, прибираємо знижку, покупець бачить
+           справжню суму і вирішує сам;
+         - перевірити не вдалося → пропускаємо: блокувати покупку через збій
+           зв'язку гірше, а такий рідкісний випадок сервер підхопить сам
+           (резерв новішого коду або сповіщення менеджерам). */
+    var passThroughUntil = 0;
+    var checking = false;
+    function interceptCheckout(e) {
+      if (!hold || suspended) return;
+      if (Date.now() < passThroughUntil) return;
+      var t = e.target;
+      var form = t && t.closest ? t.closest(".t706__orderform form") : null;
+      if (!form) return;
+      if (e.type === "click" && !(t.closest && t.closest(".t-submit"))) return;
+
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      e.stopPropagation();
+      if (checking) return;
+      checking = true;
+
+      var btn = form.querySelector(".t-submit");
+      if (btn) btn.style.opacity = "0.6";
+      var h = hold;
+      checkUsable(h, 4000).then(function (usable) {
+        checking = false;
+        if (btn) btn.style.opacity = "";
+        if (usable === false) {
+          if (hold === h) dropStaleHold();
+          var el = inCart(".rb-redeem");
+          if (el && el.scrollIntoView) el.scrollIntoView({ block: "center", behavior: "smooth" });
+          return;
+        }
+        // Живий (або не вдалося перевірити): пропускаємо саме цей повтор.
+        passThroughUntil = Date.now() + 3000;
+        if (btn) btn.click();
+        else if (form.requestSubmit) form.requestSubmit();
+      });
+    }
+
     /* ---------- оформлення: знижка йде в ціни позицій ---------- */
 
     var HIDDEN_FIELDS = ["bonus_ref", "bonus_applied"];
@@ -3045,9 +3150,13 @@ document.addEventListener("DOMContentLoaded", function () {
            в undefined.
        Якщо в слоті опинився не наш код — покупець ввів справжній промокод,
        і тоді відступаємо: знижка одна, і обрав її він. */
+    var wasOpen = false;
     function guard() {
       checkoutHook();
-      if (!cartOpen()) return;
+      var open = cartOpen();
+      if (open && !wasOpen) backgroundCheck();
+      wasOpen = open;
+      if (!open) return;
       if (hold && hold.expiresAt < Date.now()) {
         hold = null;
         lsSave(null);
@@ -3106,6 +3215,11 @@ document.addEventListener("DOMContentLoaded", function () {
       if (!hold) lsSave(null);
       if (hold) view = "applied";
       checkoutHook();
+      document.addEventListener("click", interceptCheckout, true);
+      document.addEventListener("submit", interceptCheckout, true);
+      document.addEventListener("visibilitychange", function () {
+        if (document.visibilityState === "visible" && cartOpen()) backgroundCheck();
+      });
       setInterval(guard, 500);
     }
 
