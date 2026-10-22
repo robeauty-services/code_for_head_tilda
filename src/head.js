@@ -2325,20 +2325,12 @@ document.addEventListener("DOMContentLoaded", function () {
     var RESEND_SEC = 60;
     var LS_KEY = "robeauty_bonus_hold";
 
-    /* Поки що вмикається вручну: `?bonus_test=1` в адресі будь-якої сторінки.
-       Прапорець лишається в sessionStorage, бо Тільда під час оформлення
-       перекидає між сторінками і query-рядок губиться. Так можна тестувати
-       на справжньому кошику з справжніми товарами, не чіпаючи покупців. */
+    /* Увімкнено для всіх з 22.10.2026. Вимикається на сервері
+       (BONUS_REDEMPTION_ENABLED=false у kommo-service: кошик сам покаже
+       «тимчасово недоступне»), а блок цілком ховається через
+       `window.ROBEAUTY_BONUS_ENABLED = false` у коді сторінки Тільди. */
     function enabled() {
-      try {
-        if (/(^|[?&])bonus_test=1/.test(window.location.search)) {
-          sessionStorage.setItem("robeauty_bonus_test", "1");
-        }
-        if (window.ROBEAUTY_BONUS_ENABLED === true) return true;
-        return sessionStorage.getItem("robeauty_bonus_test") === "1";
-      } catch (e) {
-        return window.ROBEAUTY_BONUS_ENABLED === true;
-      }
+      return window.ROBEAUTY_BONUS_ENABLED !== false;
     }
 
     /* { id, amount: <грн>, code: "BONUS-<ref>", phone: <цифри номера> } або null.
