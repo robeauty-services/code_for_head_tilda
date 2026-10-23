@@ -2905,6 +2905,7 @@ document.addEventListener("DOMContentLoaded", function () {
         /* Як примітка до промокоду («*промокоди дійсні…»): чорна, по центру,
            12px, 10px зверху — щоб тексти під полями не різнились. */
         ".rb-redeem__note{margin:10px 0 0;font-size:12px;line-height:normal;color:#000;text-align:center}" +
+        ".rb-redeem__num{color:#1f8a3b;font-weight:700}" +
         ".rb-redeem__note--err{color:#d0021b}" +
         ".rb-redeem__applied{display:flex;align-items:center;justify-content:space-between;gap:10px;" +
         "padding:13px 18px;border:1px solid #2e2e2e;border-radius:15px;font-size:15px}" +
@@ -2962,6 +2963,41 @@ document.addEventListener("DOMContentLoaded", function () {
       return gap > 0 ? base + " — додайте товарів ще на <strong>" + gap + " ₴</strong>" : base;
     }
 
+    /* «Залишиться 450 бонусів, з них 120 діють до 24.10».
+       Сервер віддає живі нарахування з датами згоряння, найстаріші першими;
+       списання бере з найстаріших — так само, як правило згоряння. Тож
+       віднімаємо знижку з початку списку, і перше, що лишилось, згорить
+       найраніше. Нічого не лишилось або сервер дат не дав — рядка нема. */
+    function plural(n, one, few, many) {
+      var m10 = n % 10, m100 = n % 100;
+      if (m10 === 1 && m100 !== 11) return one;
+      if (m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20)) return few;
+      return many;
+    }
+    function remainingNote() {
+      if (!hold || !hold.credits || !hold.credits.length) return "";
+      var spend = hold.applied || hold.amount || 0;
+      var left = [];
+      for (var i = 0; i < hold.credits.length; i++) {
+        var c = hold.credits[i];
+        var amt = Math.max(0, Math.floor(num(c.amount)));
+        var take = Math.min(amt, spend);
+        spend -= take;
+        if (amt - take > 0 && c.expiresOn) left.push({ amount: amt - take, on: String(c.expiresOn) });
+      }
+      var total = 0;
+      for (var j = 0; j < left.length; j++) total += left[j].amount;
+      if (total <= 0) return "";
+      var first = left[0];
+      var day = first.on.slice(8, 10) + "." + first.on.slice(5, 7);
+      var n = function (v) { return '<span class="rb-redeem__num">' + v + "</span>"; };
+      var head = "Залишиться " + n(total) + " " + plural(total, "бонус", "бонуси", "бонусів");
+      var tail = first.amount === total
+        ? ", " + plural(total, "діє", "діють", "діють") + " до " + day
+        : ", з них " + n(first.amount) + " " + plural(first.amount, "діє", "діють", "діють") + " до " + day;
+      return '<div class="rb-redeem__note">' + head + tail + "</div>";
+    }
+
     function render() {
       var el = mount();
       if (!el) return;
@@ -2976,7 +3012,9 @@ document.addEventListener("DOMContentLoaded", function () {
             : "Списано " + (hold.applied || hold.amount) + " ₴ бонусами") +
           "</span>" +
           '<button type="button" class="rb-redeem__link" data-rbr="cancel">Скасувати</button></div>' +
-          (suspended ? '<div class="rb-redeem__note">' + pausedHint() + "</div>" : "");
+          (suspended
+            ? '<div class="rb-redeem__note">' + pausedHint() + "</div>"
+            : remainingNote());
       } else if (!available) {
         html =
           '<button type="button" class="rb-redeem__btn" disabled>Використати бонуси</button>' +
@@ -3142,6 +3180,8 @@ document.addEventListener("DOMContentLoaded", function () {
             code: "BONUS-" + res.ref,
             phone: phoneDigits(),
             expiresAt: Date.now() + HOLD_MS,
+            // [{ amount, expiresOn: "YYYY-MM-DD" }], найстаріші першими.
+            credits: Array.isArray(res.credits) ? res.credits : null,
           };
           lsSave(hold);
           view = "applied";
