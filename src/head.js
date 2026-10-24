@@ -2486,6 +2486,50 @@ document.addEventListener("DOMContentLoaded", function () {
       }
       return { applied: target - rem, cuts: cuts };
     }
+    /* Набори «1=2» і «3=1» вже за ціною одного — бонуси на них не діють.
+       Список SKU тримає сервер (kommo-service, BONUS_EXCLUDED_SKUS) і віддає
+       в /availability уже нормалізованим. Половину рахуємо від решти
+       кошика і знижку розкладаємо тільки по ній; поріг 1500 ₴ — від усього.
+       Поки список не прийшов, вважаємо порожнім: сервер однаково не дасть
+       більше, ніж належить, на підтвердженні коду. */
+    var excludedSkus = {};
+    /* `00-0003330` і `00-00003330` — той самий товар: нулі після дефіса не рахуються. */
+    function normSku(raw) {
+      var s = String(raw || "").replace(/\s+/g, "").toUpperCase();
+      var m = s.match(/^([A-Z0-9]+)-0*(\d+)$/);
+      return m ? m[1] + "-" + m[2] : s;
+    }
+    /* SKU позиції: поле `sku`, а якщо порожнє — з назви («… sku:00-00003666»). */
+    function lineSku(p) {
+      if (p && p.sku) return String(p.sku);
+      var name = String((p && p.name) || "");
+      var m = name.match(/sku:\s*([A-Za-z0-9-]+)/i) || name.match(/\(((?:KU|\d{2})-\d+)\)/i);
+      return m ? m[1] : "";
+    }
+    function isExcluded(p) {
+      var sku = lineSku(p);
+      return !!sku && excludedSkus[normSku(sku)] === true;
+    }
+    function eligibleLines(products) {
+      var out = [];
+      for (var i = 0; i < (products || []).length; i++) {
+        if (products[i] && !isExcluded(products[i])) out.push(products[i]);
+      }
+      return out;
+    }
+    /* Позиції для сервера: він сам відкидає набори і бере половину від решти. */
+    function cartItems() {
+      var c = window.tcart;
+      var out = [];
+      var ps = (c && c.products) || [];
+      for (var i = 0; i < ps.length; i++) {
+        var p = ps[i];
+        if (!p || p.deleted === "yes") continue;
+        out.push({ sku: lineSku(p), amount: num(p.amount) || num(p.price) * (parseInt(p.quantity, 10) || 0) });
+      }
+      return out;
+    }
+
     function productsTotal(products) {
       var t = 0;
       for (var i = 0; i < (products || []).length; i++) {
@@ -2496,12 +2540,16 @@ document.addEventListener("DOMContentLoaded", function () {
       return round2(t);
     }
     /* Ті самі правила, що на сервері, але від поточного кошика: від 1500 ₴ і
-       не більше половини. Повертає, скільки реально спишеться, або 0. */
+       не більше половини того, що не набори. Повертає, скільки реально
+       спишеться, або 0. */
+    function planFor(products, amount) {
+      if (productsTotal(products) < MIN_ORDER) return { applied: 0, cuts: [] };
+      var ok = eligibleLines(products);
+      return plan(ok, Math.min(amount, Math.floor(productsTotal(ok) * 0.5)));
+    }
     function wanted(products) {
       if (!hold) return 0;
-      var prod = productsTotal(products);
-      if (prod < MIN_ORDER) return 0;
-      return plan(products, Math.min(hold.amount, Math.floor(prod * 0.5))).applied;
+      return planFor(products, hold.amount).applied;
     }
 
     function dropDisplayedDiscount() {
@@ -2610,6 +2658,12 @@ document.addEventListener("DOMContentLoaded", function () {
       lastAvailabilityCheck = Date.now();
       post("/availability", {})
         .then(function (res) {
+          if (res && res.ok && res.excludedSkus && res.excludedSkus.length) {
+            var next = {};
+            for (var i = 0; i < res.excludedSkus.length; i++) next[normSku(res.excludedSkus[i])] = true;
+            excludedSkus = next;
+            if (hold) applyHold();
+          }
           setAvailable(!(res && res.ok && res.enabled === false));
         })
         .catch(function () {});
@@ -2708,8 +2762,7 @@ document.addEventListener("DOMContentLoaded", function () {
       if (!hold.expiresAt || hold.expiresAt < Date.now()) return;
 
       var prodBefore = productsTotal(tp.products);
-      if (prodBefore < MIN_ORDER) return;
-      var pl = plan(tp.products, Math.min(hold.amount, Math.floor(prodBefore * 0.5)));
+      var pl = planFor(tp.products, hold.amount);
       if (pl.applied <= 0) return;
 
       // Усе, що в сумі до оплати понад товари (доставка), — до змін.
@@ -2865,6 +2918,7 @@ document.addEventListener("DOMContentLoaded", function () {
       disabled: "Списання бонусів тимчасово недоступне.",
       bad_phone: "Перевірте номер телефону.",
       cart_too_small: "Бонуси діють від суми замовлення " + MIN_ORDER + " ₴.",
+      only_excluded: "Бонуси не діють на набори «1=2» і «3=1».",
       no_bonuses: "На цьому номері немає доступних бонусів.",
       cooldown: "Новий код можна запросити за хвилину.",
       rate_limited: "Забагато спроб. Спробуйте пізніше.",
@@ -2959,6 +3013,7 @@ document.addEventListener("DOMContentLoaded", function () {
     function pausedHint() {
       var c = window.tcart;
       var gap = Math.ceil(MIN_ORDER - productsTotal(c && c.products));
+      if (gap <= 0) return "*бонуси не діють на набори «1=2» і «3=1» — додайте інші товари";
       var base = "*бонуси діють від суми замовлення <strong>" + MIN_ORDER + " ₴</strong>";
       return gap > 0 ? base + " — додайте товарів ще на <strong>" + gap + " ₴</strong>" : base;
     }
@@ -3115,7 +3170,7 @@ document.addEventListener("DOMContentLoaded", function () {
       setNote("");
       render();
 
-      post("/request-code", { phone: phone, cartTotal: prodAmount() })
+      post("/request-code", { phone: phone, cartTotal: prodAmount(), items: cartItems() })
         .then(function (res) {
           busy = false;
           if (res && res.refusal === "disabled") {
@@ -3156,6 +3211,7 @@ document.addEventListener("DOMContentLoaded", function () {
         phone: phoneValue(),
         code: code,
         cartTotal: prodAmount(),
+        items: cartItems(),
       })
         .then(function (res) {
           busy = false;
