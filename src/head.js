@@ -2513,13 +2513,30 @@ document.addEventListener("DOMContentLoaded", function () {
       var rem = target;
       var cuts = [];
       var ls = cuttableLines(products);
+      var byLine = [];
       for (var i = 0; i < ls.length && rem > 0; i++) {
         var unit = Math.min(Math.floor(ls[i].price - 1), Math.floor(rem / ls[i].q));
-        if (unit > 0) {
-          cuts.push({ p: ls[i].p, unit: unit });
-          rem -= unit * ls[i].q;
+        byLine[i] = unit > 0 ? unit : 0;
+        if (unit > 0) rem -= unit * ls[i].q;
+      }
+      /* Залишок, менший за кількість штук (7 ₴ на 3 тонери), кладемо на ОДНУ
+         штуку: при оформленні вона йде окремим рядком (див. checkoutHook).
+         Інакше покупець бачив «Списано 6 ₴, залишиться 1 бонус». */
+      var extraAt = -1;
+      if (rem > 0) {
+        for (var j = 0; j < ls.length; j++) {
+          if (Math.floor(ls[j].price - 1) - (byLine[j] || 0) >= rem) {
+            extraAt = j;
+            break;
+          }
         }
       }
+      for (var k = 0; k < ls.length; k++) {
+        var u = byLine[k] || 0;
+        var x = k === extraAt ? rem : 0;
+        if (u > 0 || x > 0) cuts.push({ p: ls[k].p, unit: u, extra: x });
+      }
+      if (extraAt >= 0) rem = 0;
       return { applied: target - rem, cuts: cuts };
     }
     /* Набори «1=2» і «3=1» вже за ціною одного — бонуси на них не діють.
@@ -2805,10 +2822,25 @@ document.addEventListener("DOMContentLoaded", function () {
       var extra = round2(num(tp.amount) - (prodBefore - num(tp.discount)));
 
       for (var i = 0; i < pl.cuts.length; i++) {
-        var p = pl.cuts[i].p;
+        var c = pl.cuts[i];
+        var p = c.p;
         var q = parseInt(p.quantity, 10) || 0;
-        p.price = round2(num(p.price) - pl.cuts[i].unit);
-        p.amount = round2(p.price * q);
+        var base = round2(num(p.price) - c.unit);
+        if (c.extra > 0 && q > 1) {
+          // Одна штука з додатковою знижкою — окремим рядком того ж товару.
+          var one = JSON.parse(JSON.stringify(p));
+          one.quantity = 1;
+          one.price = round2(base - c.extra);
+          one.amount = one.price;
+          asOrderLine(one);
+          tp.products.splice(tp.products.indexOf(p) + 1, 0, one);
+          p.quantity = q - 1;
+          q = q - 1;
+        } else if (c.extra > 0) {
+          base = round2(base - c.extra);
+        }
+        p.price = base;
+        p.amount = round2(base * q);
         asOrderLine(p);
       }
       var prodAfter = round2(prodBefore - pl.applied);
