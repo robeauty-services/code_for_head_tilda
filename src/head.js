@@ -2457,16 +2457,37 @@ document.addEventListener("DOMContentLoaded", function () {
        чіпаємо. Якщо точно розкласти не виходить (усі позиції по 2+ шт.),
        знижка буде на кілька гривень меншою — і саме її показуємо, щоб
        кошик і оплата сходились до копійки. */
-    /* Ціну можна знижувати лише позиціям з кнопок «#order:… [sku:…]».
-       Товари каталогу Тільди (картки магазину, без SKU в назві) сервер
-       Тільди при оформленні звіряє з каталогом і відхиляє замовлення:
-       «The price of a product … has been changed» (22–25.10.2026, ~60%
-       замовлень з бонусами). За 30 днів замовлень: SKU в назві — жодного
-       разу не звʼязано з каталогом (34 345 з 34 345), без SKU — звʼязано
-       4 588 з 4 681. Тож на такі позиції знижка не йде взагалі; бонус
-       лягає на решту, а якщо не влазить — списується менше. */
+    /* Товари каталогу Тільди (картки магазину) сервер Тільди при оформленні
+       звіряє з каталогом за `uid`/`lid` і відхиляє замовлення з іншою ціною:
+       «The price of a product … has been changed» (22–25.10.2026). Позиції з
+       кнопок «#order:… [sku:…]» таких id не мають і не звіряються ніколи
+       (34 345 з 34 345 за 30 днів).
+
+       Тож знижку кладемо спершу на «#order»-позиції, а якщо її треба
+       покласти на позицію каталогу — у момент оформлення відправляємо таку
+       позицію так само, як «#order»: без id каталогу, з SKU в назві
+       (див. asOrderLine). Позицію каталогу без SKU не чіпаємо: без нього
+       замовлення в Kommo не впізнало б товар. */
+    function isCatalogueLine(p) {
+      return !!(p && (p.uid || p.lid || p.gen_uid));
+    }
     function priceIsOurs(p) {
-      return /sku:/i.test(String((p && p.name) || ""));
+      if (!p) return false;
+      if (/sku:/i.test(String(p.name || ""))) return true;
+      return isCatalogueLine(p) && !!String(p.sku || "").trim();
+    }
+    /* Позиція каталогу → вигляд «#order»-позиції. Тільки в tildapayment, у
+       момент оформлення, і тільки для позицій, на які лягла знижка. */
+    function asOrderLine(p) {
+      if (!isCatalogueLine(p) || /sku:/i.test(String(p.name || ""))) return;
+      var sku = String(p.sku || "").trim();
+      if (!sku) return;
+      p.name = String(p.name || "") + " [sku:" + sku + "]";
+      p.lid = "";
+      p.gen_uid = "";
+      delete p.uid;
+      delete p.part_uids;
+      delete p.sku;
     }
     function cuttableLines(products) {
       var out = [];
@@ -2479,8 +2500,11 @@ document.addEventListener("DOMContentLoaded", function () {
         if (q <= 0 || price <= 1) continue;
         out.push({ p: p, q: q, price: price });
       }
+      /* Спершу «#order»-позиції (їх не треба перетворювати), далі за сумою. */
       out.sort(function (a, b) {
-        return b.price * b.q - a.price * a.q;
+        var ca = isCatalogueLine(a.p) && !/sku:/i.test(String(a.p.name || "")) ? 1 : 0;
+        var cb = isCatalogueLine(b.p) && !/sku:/i.test(String(b.p.name || "")) ? 1 : 0;
+        return ca - cb || b.price * b.q - a.price * a.q;
       });
       return out;
     }
@@ -2785,6 +2809,7 @@ document.addEventListener("DOMContentLoaded", function () {
         var q = parseInt(p.quantity, 10) || 0;
         p.price = round2(num(p.price) - pl.cuts[i].unit);
         p.amount = round2(p.price * q);
+        asOrderLine(p);
       }
       var prodAfter = round2(prodBefore - pl.applied);
       tp.prodamount = prodAfter;
