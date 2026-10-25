@@ -2457,11 +2457,23 @@ document.addEventListener("DOMContentLoaded", function () {
        чіпаємо. Якщо точно розкласти не виходить (усі позиції по 2+ шт.),
        знижка буде на кілька гривень меншою — і саме її показуємо, щоб
        кошик і оплата сходились до копійки. */
+    /* Ціну можна знижувати лише позиціям з кнопок «#order:… [sku:…]».
+       Товари каталогу Тільди (картки магазину, без SKU в назві) сервер
+       Тільди при оформленні звіряє з каталогом і відхиляє замовлення:
+       «The price of a product … has been changed» (22–25.10.2026, ~60%
+       замовлень з бонусами). За 30 днів замовлень: SKU в назві — жодного
+       разу не звʼязано з каталогом (34 345 з 34 345), без SKU — звʼязано
+       4 588 з 4 681. Тож на такі позиції знижка не йде взагалі; бонус
+       лягає на решту, а якщо не влазить — списується менше. */
+    function priceIsOurs(p) {
+      return /sku:/i.test(String((p && p.name) || ""));
+    }
     function cuttableLines(products) {
       var out = [];
       for (var i = 0; i < (products || []).length; i++) {
         var p = products[i];
         if (!p || p.deleted === "yes" || p.portion) continue;
+        if (!priceIsOurs(p)) continue;
         var q = parseInt(p.quantity, 10) || 0;
         var price = num(p.price);
         if (q <= 0 || price <= 1) continue;
@@ -3013,7 +3025,7 @@ document.addEventListener("DOMContentLoaded", function () {
     function pausedHint() {
       var c = window.tcart;
       var gap = Math.ceil(MIN_ORDER - productsTotal(c && c.products));
-      if (gap <= 0) return "*бонуси не діють на набори «1=2» і «3=1» — додайте інші товари";
+      if (gap <= 0) return "*на ці товари бонуси не діють — додайте інші товари";
       var base = "*бонуси діють від суми замовлення <strong>" + MIN_ORDER + " ₴</strong>";
       return gap > 0 ? base + " — додайте товарів ще на <strong>" + gap + " ₴</strong>" : base;
     }
@@ -3163,6 +3175,14 @@ document.addEventListener("DOMContentLoaded", function () {
       var phone = phoneValue();
       if (!phone) {
         setNote("Спочатку введіть номер телефону.", true);
+        render();
+        return;
+      }
+      /* Нема на що покласти знижку (лише набори або лише товари каталогу) —
+         не шлемо SMS даремно. */
+      var cp = window.tcart && window.tcart.products;
+      if (productsTotal(cp) >= MIN_ORDER && planFor(cp, Infinity).applied <= 0) {
+        setNote("На ці товари бонуси не діють.", true);
         render();
         return;
       }
