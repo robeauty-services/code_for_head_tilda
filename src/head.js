@@ -297,6 +297,23 @@ document.addEventListener("DOMContentLoaded", function () {
     }).catch((err) => console.error(`[CAPI Error - ${endpoint}]`, err));
   };
 
+  // Та же подія в TikTok, з тим самим event_id (секція 4). Секція 4 стоїть у
+  // файлі нижче, але всі виклики відбуваються вже після завантаження файлу.
+  var sendToTikTok = (eventName, data, opts) => {
+    try {
+      if (window.rbTikTok) window.rbTikTok.track(eventName, data, opts);
+    } catch (e) {}
+  };
+
+  // Кошик Тільди -> contents для TikTok (ті самі номери товарів, що й у Meta).
+  var tikTokContents = (parsedCart) =>
+    parsedCart.ga_items.map((it) => ({
+      content_id: it.item_id,
+      content_name: it.item_name,
+      price: it.price,
+      quantity: it.quantity,
+    }));
+
   var dispatchEvent = (method, eventName, params, options) => {
     if (window.fbq.callMethod)
       return window.fbq.callMethod.call(
@@ -653,6 +670,30 @@ document.addEventListener("DOMContentLoaded", function () {
         },
       });
 
+      var atcUser = getUserDataFromStorage();
+      sendToTikTok(
+        "AddToCart",
+        {
+          contents: content_id
+            ? [
+                {
+                  content_id: content_id,
+                  content_name: data.content_name || "",
+                  price: itemValue,
+                  quantity: 1,
+                },
+              ]
+            : [],
+          value: itemValue,
+          currency: "UAH",
+        },
+        {
+          eventId: eventId,
+          user: { email: atcUser.email, phone: atcUser.phone },
+          server: true,
+        },
+      );
+
       return dispatchEvent(
         "track",
         "AddToCart",
@@ -818,6 +859,25 @@ document.addEventListener("DOMContentLoaded", function () {
           },
         });
 
+        if (id) {
+          sendToTikTok(
+            "ViewContent",
+            {
+              contents: [
+                {
+                  content_id: String(id),
+                  content_name: itemName,
+                  price: price,
+                  quantity: 1,
+                },
+              ],
+              value: price,
+              currency: "UAH",
+            },
+            { eventId: vcEventId },
+          );
+        }
+
         // --- Отправка Google view_item ---
         var gViEventId = generateEventId("gvi");
         sendToGoogle("view_item", {
@@ -887,6 +947,23 @@ document.addEventListener("DOMContentLoaded", function () {
             user_data: serverUserData,
             custom_data: payload,
           });
+
+          sendToTikTok(
+            "InitiateCheckout",
+            {
+              contents: tikTokContents(parsedCart),
+              value: parsedCart.value,
+              currency: parsedCart.currency,
+            },
+            {
+              eventId: icEventId,
+              user: {
+                email: serverUserData.email,
+                phone: serverUserData.phone,
+              },
+              server: true,
+            },
+          );
 
           // GOOGLE begin_checkout
           var gBcEventId = generateEventId("gbc");
@@ -1026,6 +1103,22 @@ document.addEventListener("DOMContentLoaded", function () {
           },
           cart: data.cart,
         });
+
+        sendToTikTok(
+          "Purchase",
+          {
+            contents: tikTokContents(parsedCart),
+            value: parsedCart.value,
+            currency: parsedCart.currency,
+          },
+          {
+            eventId: data.eventId,
+            eventTime: data.event_time,
+            pageUrl: data.event_source_url,
+            user: { email: data.emailInput, phone: data.phoneInput },
+            server: true,
+          },
+        );
       } catch (error) {
         console.error("Purchase processing error:", error);
       } finally {
@@ -1231,6 +1324,140 @@ document.addEventListener("DOMContentLoaded", function () {
   ttq.load("CVSFT93C77UF96PLUHKG");
   ttq.page();
 })(window, document, "ttq");
+
+/* TikTok events ride on section 3: every TikTok event is sent from the spot
+   where the matching Meta event is sent, at the same moment and with the same
+   event_id. So Purchase inherits the section 9 payment check — cash on the
+   thank-you page, online only after the backend confirmed the paid order —
+   instead of firing at cart submit for every order, paid or not, as the old
+   Tilda block rec1285753511 did.
+
+   AddToCart, InitiateCheckout and Purchase also get a server copy through the
+   relay on our VPS (/var/www/webhooks/tiktok_capi/tt_capi.php, which holds the
+   Events API token). TikTok merges the two copies by event_id. ViewContent is
+   browser-only: it is the high-volume one and nobody optimises on it.
+
+   GTM tag «ATC_TT» skips itself once `window.rbTikTok` exists. */
+(function () {
+  var RELAY_URL =
+    "https://payment-handler.site/webhooks/tiktok_capi/tt_capi.php";
+
+  var sha256 = function (str) {
+    try {
+      if (!str || !window.crypto || !crypto.subtle) return Promise.resolve("");
+      return crypto.subtle
+        .digest("SHA-256", new TextEncoder().encode(str))
+        .then(function (buf) {
+          return Array.from(new Uint8Array(buf))
+            .map(function (b) {
+              return b.toString(16).padStart(2, "0");
+            })
+            .join("");
+        })
+        .catch(function () {
+          return "";
+        });
+    } catch (e) {
+      return Promise.resolve("");
+    }
+  };
+
+  var normEmail = function (email) {
+    var s = String(email || "")
+      .trim()
+      .toLowerCase();
+    return s.indexOf("@") > 0 ? s : "";
+  };
+
+  /* TikTok wants E.164. Customers type 0671234567 or 380671234567. */
+  var normPhone = function (phone) {
+    var d = String(phone || "").replace(/\D/g, "");
+    if (d.length === 10 && d.charAt(0) === "0") d = "38" + d;
+    else if (d.length === 9) d = "380" + d;
+    return d.length >= 11 ? "+" + d : "";
+  };
+
+  var getCookie = function (name) {
+    var m = document.cookie.match(new RegExp("(?:^|; )" + name + "=([^;]*)"));
+    return m ? decodeURIComponent(m[1]) : undefined;
+  };
+
+  var hashUser = function (user) {
+    user = user || {};
+    return Promise.all([
+      sha256(normEmail(user.email)),
+      sha256(normPhone(user.phone)),
+    ]).then(function (h) {
+      return { email: h[0], phone: h[1] };
+    });
+  };
+
+  /* data:  { contents: [{ content_id, content_name, price, quantity }],
+              value, currency }
+     opts:  { eventId, user: { email, phone } (plain), server, eventTime,
+              pageUrl } */
+  var track = function (event, data, opts) {
+    data = data || {};
+    opts = opts || {};
+    var contents = (data.contents || []).filter(function (c) {
+      return c && c.content_id;
+    });
+    var currency = data.currency || "UAH";
+    var eventTime = opts.eventTime || Math.floor(Date.now() / 1000);
+    var pageUrl = opts.pageUrl || window.location.href;
+
+    return hashUser(opts.user)
+      .then(function (hashed) {
+        var identity = {};
+        if (hashed.email) identity.email = hashed.email;
+        if (hashed.phone) identity.phone_number = hashed.phone;
+        if (identity.email || identity.phone_number) ttq.identify(identity);
+
+        var props = { contents: contents, currency: currency };
+        if (contents.length) props.content_type = "product";
+        if (typeof data.value === "number" && data.value >= 0) {
+          props.value = data.value;
+        }
+        ttq.track(event, props, { event_id: opts.eventId });
+
+        if (!opts.server) return;
+        // The relay sums value from contents and reads currency per item.
+        fetch(RELAY_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            event: event,
+            event_id: opts.eventId,
+            event_time: eventTime,
+            context: {
+              page: { url: pageUrl },
+              user_agent: navigator.userAgent,
+            },
+            user: {
+              email: hashed.email || undefined,
+              phone: hashed.phone || undefined,
+              ttp: getCookie("_ttp"),
+            },
+            contents: contents.map(function (c) {
+              return {
+                content_id: String(c.content_id),
+                content_name: c.content_name || "",
+                price: Number(c.price) || 0,
+                quantity: Number(c.quantity) || 1,
+                currency: currency,
+              };
+            }),
+          }),
+          keepalive: true,
+        }).catch(function () {});
+      })
+      .catch(function (e) {
+        console.error("[TikTok]", event, e);
+      });
+  };
+
+  window.rbTikTok = { track: track };
+})();
 
 /* ===================== 5. Save basket and user data ===================== */
 
