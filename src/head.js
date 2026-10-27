@@ -3223,6 +3223,7 @@ document.addEventListener("DOMContentLoaded", function () {
       expired: "Термін дії коду закінчився — запросіть новий.",
       burned: "Забагато невірних спроб. Запросіть новий код.",
       not_found: "Спочатку запросіть код.",
+      verify_failed: "Не вдалося перевірити код. Спробуйте ще раз за хвилину.",
     };
     function refusalText(key) {
       return REFUSAL_TEXT[key] || "Щось пішло не так. Спробуйте ще раз.";
@@ -3550,8 +3551,10 @@ document.addEventListener("DOMContentLoaded", function () {
           render();
         })
         .catch(function () {
+          /* Сервер не відповів (мережа, 502) — код міг бути правильним, і
+             спроба не зарахована, тож «Невірний код» тут неправда. */
           busy = false;
-          setNote(refusalText("bad_code"), true);
+          setNote(refusalText("verify_failed"), true);
           render();
         });
     }
