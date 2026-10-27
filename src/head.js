@@ -3096,6 +3096,7 @@ document.addEventListener("DOMContentLoaded", function () {
         } catch (e) {
           if (window.console && console.warn) console.warn("[bonus] checkout", e);
         }
+        try { if (typeof window.__rbPaymentSnapshot === "function") window.__rbPaymentSnapshot(arguments[0]); } catch (e) {}
         return r;
       });
     }
@@ -3669,5 +3670,150 @@ document.addEventListener("DOMContentLoaded", function () {
     }
   } catch (e) {
     if (window.console && console.warn) console.warn("[bonus]", e);
+  }
+})();
+
+/* ===================== 11. Payment snapshot ===================== */
+/* Saves what the customer actually pays for each main-cart order, so the
+   /thanks page can show "goods / discount / total". `user_purchase_info`
+   (section 5) is built from `tcart`, which keeps full prices, so it cannot
+   tell what was paid after bonuses or a promo code.
+
+   Called by section 10 from the `addPaymentInfoToForm` wrapper, right after
+   `applyToPayment`: at that moment `tildaForm.tildapayment` holds the final
+   amounts and `tcart` still holds the full prices and the promo code. If the
+   page sets `window.ROBEAUTY_BONUS_ENABLED = false`, section 10 does not boot,
+   the wrapper is never installed and no snapshot is written.
+
+   Writes `localStorage.rb_order_payment`. Nothing else in the head clears it,
+   including the clearTCart wrapper. Any failure is swallowed: the order must
+   go through even if the snapshot does not.
+   Off switch: `window.RB_PAY_SNAPSHOT_ENABLED = false` in the page code. */
+(function () {
+  try {
+    var LS_KEY = "rb_order_payment";
+    // Only the main cart: the upsell cart on /thanks goes through the same
+    // Tilda function and would overwrite the main order's snapshot.
+    var MAIN_CART_FORM_ID = "form665507684";
+
+    function round2(n) {
+      return Math.round(n * 100) / 100;
+    }
+
+    // null / "" would become 0 with Number(); treat them as missing instead.
+    function toAmount(v) {
+      if (v === null || v === undefined || v === "") return NaN;
+      return Number(v);
+    }
+
+    /* Pure calculation, no DOM or storage. Returns null when the data is
+       missing or broken, so nothing is written. */
+    function computeSnapshot(tp, tc, bonusApplied, now) {
+      if (!tp || !tc) return null;
+
+      var goodsFull = toAmount(tc.prodamount);
+      var goodsAfter;
+      if (tp.prodamount_withdiscount != null) {
+        goodsAfter = toAmount(tp.prodamount_withdiscount);
+      } else {
+        goodsAfter = toAmount(tp.prodamount);
+      }
+      var toPay = toAmount(tp.amount);
+      if (isNaN(goodsFull) || isNaN(goodsAfter) || isNaN(toPay)) return null;
+
+      goodsFull = round2(goodsFull);
+      goodsAfter = round2(goodsAfter);
+      toPay = round2(toPay);
+      var discount = Math.max(0, round2(goodsFull - goodsAfter));
+      var delivery = Math.max(0, round2(toPay - goodsAfter));
+
+      var promoCode = "";
+      if (tc.promocode && typeof tc.promocode === "object" && tc.promocode.promocode) {
+        promoCode = String(tc.promocode.promocode);
+      }
+      // Section 10 shows bonuses through tcart.promocode as "BONUS-<ref>";
+      // that is not a real promo code.
+      var isBonusCode = /^BONUS-/i.test(promoCode);
+
+      var discountType = null;
+      var discountCode = null;
+      if (discount > 0) {
+        if (bonusApplied > 0) {
+          discountType = "bonus";
+        } else if (promoCode && !isBonusCode) {
+          discountType = "promo";
+          discountCode = promoCode;
+        } else {
+          discountType = "other";
+        }
+      }
+
+      return {
+        v: 1,
+        savedAt: now,
+        goods_full: goodsFull,
+        goods_after: goodsAfter,
+        discount: discount,
+        discount_type: discountType,
+        discount_code: discountCode,
+        delivery: delivery,
+        to_pay: toPay,
+        currency: "UAH",
+        raw: {
+          tp: {
+            amount: tp.amount,
+            prodamount: tp.prodamount,
+            prodamount_withdiscount: tp.prodamount_withdiscount,
+            promocode: tp.promocode,
+            discount: tp.discount,
+          },
+          tcart: {
+            amount: tc.amount,
+            prodamount: tc.prodamount,
+            prodamount_withdiscount: tc.prodamount_withdiscount,
+            promocode: tc.promocode,
+          },
+        },
+      };
+    }
+
+    // Tilda passes either the form element or a jQuery wrapper around it.
+    function formEl(f) {
+      if (f && f.nodeType === 1) return f;
+      if (f && f[0] && f[0].nodeType === 1) return f[0];
+      return null;
+    }
+
+    /* Section 10 sets this hidden field in the same call, just before us, and
+       removes it at the start of every call — so it describes this order only. */
+    function bonusAppliedIn(form) {
+      var el = form.querySelector('input[name="bonus_applied"]');
+      if (!el) return 0;
+      var n = Number(el.value);
+      if (isNaN(n)) return 0;
+      return n;
+    }
+
+    function saveSnapshot(form) {
+      try {
+        // Checked per call, so the page code can set it after this script loads.
+        if (window.RB_PAY_SNAPSHOT_ENABLED === false) return;
+        form = formEl(form);
+        if (!form || form.id !== MAIN_CART_FORM_ID) return;
+
+        var tp = window.tildaForm && window.tildaForm.tildapayment;
+        var tc = window.tcart;
+        var snap = computeSnapshot(tp, tc, bonusAppliedIn(form), Date.now());
+        if (!snap) return;
+        localStorage.setItem(LS_KEY, JSON.stringify(snap));
+      } catch (e) {
+        if (window.console && console.warn) console.warn("[rb-pay]", e);
+      }
+    }
+
+    saveSnapshot.compute = computeSnapshot; // for tests
+    window.__rbPaymentSnapshot = saveSnapshot;
+  } catch (e) {
+    if (window.console && console.warn) console.warn("[rb-pay]", e);
   }
 })();
