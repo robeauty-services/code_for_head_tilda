@@ -3817,3 +3817,292 @@ document.addEventListener("DOMContentLoaded", function () {
     if (window.console && console.warn) console.warn("[rb-pay]", e);
   }
 })();
+
+/* ===================== 12. Cart snapshot ===================== */
+/* Sends the cart contents and the UTM tags to our server the moment an order
+   with online payment is submitted, before the customer leaves for WayForPay.
+   The `unpaidLeads` cron in kommo-service appends that snapshot to the deal
+   note when the order is never paid: by then the browser is long gone and
+   nothing on our side knows what was in the cart or where the customer came
+   from. Backend: tilda-orders, POST /api/tilda-orders/cart-snapshot.
+
+   This block only reads. It never touches the DOM, the form fields, `tcart`,
+   `dataLayer` or anybody else's localStorage, and it never cancels an event.
+   The request is fire-and-forget with `keepalive`, so the cart and the
+   redirect to payment behave exactly as before even when our server is down
+   or blocked by an adblocker. Every failure is swallowed; `console.debug`
+   output only appears with `window.RB_CART_SNAPSHOT_DEBUG = true`.
+
+   Off switch is the server — the endpoint can be disabled. A full rollback is
+   repinning the bundle to @robeauty-v1.0.26. GrowthBook is loaded on the site,
+   but no section reads a feature flag and its auto bundle fetches features
+   asynchronously, so a flag read at submit time would not be reliable. */
+(function () {
+  try {
+    var SNAPSHOT_URL =
+      "https://payment-handler.site/api/tilda-orders/cart-snapshot";
+    // Only the main cart: the upsell cart on /thanks is a separate order.
+    var MAIN_CART_FORM_ID = "form665507684";
+    var SENT_PREFIX = "rb_cart_snapshot_sent:";
+    var MAX_PRODUCTS = 50;
+    var MAX_TEXT = 200;
+    // Browsers cap a `keepalive` body at 64 KB and drop the request silently.
+    var MAX_BODY = 60 * 1024;
+    var UTM_KEYS = [
+      "utm_source",
+      "utm_medium",
+      "utm_campaign",
+      "utm_content",
+      "utm_term",
+    ];
+
+    function debug(msg, data) {
+      if (window.RB_CART_SNAPSHOT_DEBUG !== true) return;
+      if (window.console && console.debug) {
+        console.debug("[rb-cart]", msg, data);
+      }
+    }
+
+    function cut(value) {
+      if (value === null || value === undefined) return "";
+      return String(value).trim().slice(0, MAX_TEXT);
+    }
+
+    // A malformed percent sequence throws; the raw value beats nothing.
+    function safeDecode(value) {
+      try {
+        return decodeURIComponent(value);
+      } catch (e) {
+        return String(value);
+      }
+    }
+
+    function readCookie(name) {
+      var match = document.cookie.match(
+        new RegExp("(?:^|; )" + name + "=([^;]*)"),
+      );
+      return match ? match[1] : "";
+    }
+
+    /* Tilda's stat id is `T202609-1374965894`; the order itself is the digits.
+       Same normalisation as section 9, so both mean the same order — and the
+       same number WayForPay shows as `2095616_<order>`. */
+    function bareOrderId(raw) {
+      var id = String(raw || "")
+        .trim()
+        .replace(/^T\d+-/i, "");
+      return /^\d{6,12}$/.test(id) ? id : "";
+    }
+
+    /* The order id as Tilda announced it, looked up by field and not by event
+       name: section 9 renames the purchase push while it holds it back. */
+    function orderIdFromDataLayer(dl) {
+      if (!dl || !dl.length) return "";
+      for (var i = dl.length - 1; i >= 0; i--) {
+        var item = dl[i] || {};
+        var ecommerce = item.ecommerce || {};
+        var purchase = ecommerce.purchase;
+        var raw =
+          (purchase && purchase.actionField && purchase.actionField.id) ||
+          ecommerce.transaction_id ||
+          item.transaction_id ||
+          "";
+        var id = bareOrderId(raw);
+        if (id) return id;
+      }
+      return "";
+    }
+
+    /* Tilda keeps every `utm_*` pair of the landing URL in one cookie: it
+       lowercases the URL, joins the pairs with `|||` and percent-encodes the
+       whole string once more (`Tilda.saveUTM` in tilda-events-1.0). So a value
+       is decoded twice — once as the cookie, once as the pair. */
+    function parseTildaUtm(rawCookie) {
+      var found = {};
+      if (!rawCookie) return found;
+      var pairs = safeDecode(String(rawCookie)).split("|||");
+      for (var i = 0; i < pairs.length; i++) {
+        var eq = pairs[i].indexOf("=");
+        if (eq < 1) continue;
+        // Tilda's own parser strips this prefix, left by `&amp;utm_…` links.
+        var key = pairs[i].slice(0, eq).replace(/^amp;/, "");
+        if (UTM_KEYS.indexOf(key) < 0) continue;
+        var value = cut(safeDecode(pairs[i].slice(eq + 1).replace(/\+/g, " ")));
+        if (value) found[key] = value;
+      }
+      return found;
+    }
+
+    function parseUtmFromQuery(search) {
+      var found = {};
+      if (!search) return found;
+      for (var i = 0; i < UTM_KEYS.length; i++) {
+        var match = new RegExp("[?&]" + UTM_KEYS[i] + "=([^&#]*)", "i").exec(
+          search,
+        );
+        if (!match) continue;
+        var value = cut(safeDecode(match[1].replace(/\+/g, " ")));
+        if (value) found[UTM_KEYS[i]] = value;
+      }
+      return found;
+    }
+
+    /* Priority: Tilda's cookie, then the `utm_source` cookie from section 1,
+       then the current URL. A later source only fills a key still missing. */
+    function collectUtm(tildaUtmCookie, utmSourceCookie, search) {
+      var utm = parseTildaUtm(tildaUtmCookie);
+      if (!utm.utm_source) {
+        var source = cut(safeDecode(String(utmSourceCookie || "")));
+        if (source) utm.utm_source = source;
+      }
+      var fromQuery = parseUtmFromQuery(search);
+      for (var i = 0; i < UTM_KEYS.length; i++) {
+        var key = UTM_KEYS[i];
+        if (!utm[key] && fromQuery[key]) utm[key] = fromQuery[key];
+      }
+      return utm;
+    }
+
+    /* SKU of a line: `[sku:…]` in the name, which is how the order buttons put
+       it there, otherwise Tilda's own fields. Same source as section 5. */
+    function skuOf(product) {
+      var match = String(product.name || "").match(/\[sku:\s*([^\]]+)\]/i);
+      if (match && match[1]) return cut(match[1]);
+      return cut(product.sku || product.uid || "");
+    }
+
+    function toNumber(value) {
+      var n = Number(value);
+      return isFinite(n) ? n : 0;
+    }
+
+    function collectProducts(cart) {
+      var items = [];
+      if (!cart || !cart.products || !cart.products.length) return items;
+      var products = cart.products;
+      for (var i = 0; i < products.length; i++) {
+        if (items.length >= MAX_PRODUCTS) break;
+        var product = products[i] || {};
+        items.push({
+          name: cut(product.name),
+          sku: skuOf(product),
+          quantity: parseInt(product.quantity, 10) || 1,
+          price: toNumber(product.price),
+          url: cut(product.url),
+        });
+      }
+      return items;
+    }
+
+    /* Tilda clears `tcart` around the success callback, so localStorage is
+       read first and the live object is the fallback. An empty cart is still
+       worth sending — the UTM tags are the other half of the note — but a
+       previous order is never substituted for it, as section 5 does. */
+    function readCart() {
+      var stored = null;
+      try {
+        stored = JSON.parse(localStorage.getItem("tcart") || "null");
+      } catch (e) {}
+      if (stored && stored.products && stored.products.length) return stored;
+      var live = window.tcart;
+      if (live && live.products && live.products.length) return live;
+      return stored || live || null;
+    }
+
+    /* Drops the tail of a cart that would not fit into a `keepalive` body. */
+    function buildBody(payload) {
+      var body = JSON.stringify(payload);
+      while (body.length > MAX_BODY && payload.products.length > 1) {
+        var half = Math.floor(payload.products.length / 2);
+        payload.products = payload.products.slice(0, half);
+        body = JSON.stringify(payload);
+      }
+      if (body.length > MAX_BODY) return "";
+      return body;
+    }
+
+    /* Same rule as section 9: an empty value or `cash` is not an online
+       payment, and only an online payment can stay unpaid. */
+    function paysOnline(form) {
+      var el =
+        form.querySelector('input[name="paymentsystem"]:checked') ||
+        document.querySelector('.t706 input[name="paymentsystem"]:checked') ||
+        document.querySelector('input[name="paymentsystem"]:checked');
+      var value = el && el.value ? String(el.value).toLowerCase() : "";
+      return value !== "" && value !== "cash";
+    }
+
+    /* Tilda sets `tildaForm.orderIdForStat` and pushes the purchase to
+       `dataLayer` in the same success handler, both before it triggers
+       `tildaform:aftersuccess` — so the order number is already there. */
+    function onSuccess(e) {
+      try {
+        var form = e && e.target;
+        if (!form || !form.closest) return;
+        if (!form.closest(".t706__orderform")) return;
+        if (form.id !== MAIN_CART_FORM_ID) return;
+        if (!paysOnline(form)) return;
+
+        var tildaForm = window.tildaForm;
+        var orderNo =
+          orderIdFromDataLayer(window.dataLayer) ||
+          bareOrderId(tildaForm && tildaForm.orderIdForStat);
+        if (!orderNo) {
+          debug("no order id");
+          return;
+        }
+
+        // One snapshot per order, however often the form reports success.
+        var sentKey = SENT_PREFIX + orderNo;
+        try {
+          if (sessionStorage.getItem(sentKey)) return;
+          sessionStorage.setItem(sentKey, "1");
+        } catch (err) {}
+
+        var cart = readCart();
+        var payload = { order_no: orderNo };
+        var amount = Number(cart && cart.amount);
+        if (isFinite(amount) && amount > 0) payload.amount = amount;
+        payload.products = collectProducts(cart);
+        payload.utm = collectUtm(
+          readCookie("TILDAUTM"),
+          readCookie("utm_source"),
+          window.location.search,
+        );
+        // A URL outgrows a text field, but is still bounded.
+        payload.page_url = String(window.location.href).slice(0, 500);
+
+        var body = buildBody(payload);
+        if (!body) {
+          debug("body too big");
+          return;
+        }
+
+        // No `await`, no reading the answer: the redirect to payment must not
+        // wait for us, and there is nothing in the reply we could use.
+        fetch(SNAPSHOT_URL, {
+          method: "POST",
+          keepalive: true,
+          credentials: "omit",
+          headers: { "Content-Type": "application/json" },
+          body: body,
+        }).catch(function () {});
+        debug("sent", payload);
+      } catch (err) {
+        debug("failed", err);
+      }
+    }
+
+    document.addEventListener("tildaform:aftersuccess", onSuccess);
+
+    // The pure parts, so `npm test` can check them without a browser.
+    window.__rbCartSnapshot = {
+      bareOrderId: bareOrderId,
+      orderIdFromDataLayer: orderIdFromDataLayer,
+      parseTildaUtm: parseTildaUtm,
+      collectUtm: collectUtm,
+      collectProducts: collectProducts,
+      buildBody: buildBody,
+    };
+  } catch (e) {}
+})();
