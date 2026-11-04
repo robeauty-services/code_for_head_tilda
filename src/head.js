@@ -3819,12 +3819,18 @@ document.addEventListener("DOMContentLoaded", function () {
 })();
 
 /* ===================== 12. Cart snapshot ===================== */
-/* Sends the cart contents and the UTM tags to our server the moment an order
-   with online payment is submitted, before the customer leaves for WayForPay.
+/* Sends the cart contents, the UTM tags and what the customer typed into the
+   cart form to our server the moment an order with online payment is
+   submitted, before the customer leaves for WayForPay.
    The `unpaidLeads` cron in kommo-service appends that snapshot to the deal
    note when the order is never paid: by then the browser is long gone and
    nothing on our side knows what was in the cart or where the customer came
    from. Backend: tilda-orders, POST /api/tilda-orders/cart-snapshot.
+
+   `details` carries a whitelist and nothing else: the name, the delivery
+   address, the chosen call option and payment system, the promo code, the
+   delivery method and the total. The phone, the email and the `ma_*` fields
+   are never read — the form is asked for named fields, never iterated.
 
    This block only reads. It never touches the DOM, the form fields, `tcart`,
    `dataLayer` or anybody else's localStorage, and it never cancels an event.
@@ -3855,6 +3861,19 @@ document.addEventListener("DOMContentLoaded", function () {
       "utm_content",
       "utm_term",
     ];
+    /* What may leave the cart form, as [key in `details`, field name]. The
+       form is only ever asked for these names, so the phone, the email and
+       the `ma_*` fields cannot end up in the request by accident. */
+    var DETAIL_FIELDS = [
+      ["name", "name"],
+      ["surname", "surname"],
+      ["city", "city"],
+      ["address", "address"],
+      ["call_option", "CallOption"],
+      ["payment_system", "paymentsystem"],
+    ];
+    // The rest of `details`, taken from the cart object.
+    var CART_DETAIL_KEYS = ["promocode", "delivery", "total"];
 
     function debug(msg, data) {
       if (window.RB_CART_SNAPSHOT_DEBUG !== true) return;
@@ -4009,6 +4028,86 @@ document.addEventListener("DOMContentLoaded", function () {
       return stored || live || null;
     }
 
+    /* The whitelisted form values. FormData returns the checked radio of a
+       group and nothing at all for an empty field. */
+    function readFormFields(form) {
+      var fields = {};
+      var data;
+      try {
+        data = new FormData(form);
+      } catch (e) {
+        return fields;
+      }
+      for (var i = 0; i < DETAIL_FIELDS.length; i++) {
+        var value = cut(data.get(DETAIL_FIELDS[i][1]));
+        if (value) fields[DETAIL_FIELDS[i][0]] = value;
+      }
+      return fields;
+    }
+
+    /* What the cart itself knows about the order. `tcart.total` is the number
+       of items and not money (`tcart__updateTotalProductsinCartObj` sums the
+       quantities into it), so the total with discounts and delivery comes from
+       `tcart.amount` — the same number the top-level `amount` carries. */
+    function readCartFields(cart) {
+      var fields = {};
+      if (!cart) return fields;
+
+      var code = cart.promocode;
+      if (code && typeof code === "object") code = code.promocode;
+      code = cut(code);
+      // Section 10 shows bonuses through the same slot as `BONUS-<ref>`. That
+      // is not a code the customer entered, and it only confuses a manager.
+      if (code && !/^BONUS-/i.test(code)) fields.promocode = code;
+
+      var delivery = cart.delivery;
+      if (delivery && typeof delivery === "object") delivery = delivery.name;
+      delivery = cut(delivery);
+      if (delivery) fields.delivery = delivery;
+
+      var total = Number(cart.amount);
+      if (isFinite(total) && total > 0) fields.total = total;
+
+      return fields;
+    }
+
+    function readDetails(form, cart) {
+      var fields = readFormFields(form);
+      var cartFields = readCartFields(cart);
+      for (var key in cartFields) {
+        if (Object.prototype.hasOwnProperty.call(cartFields, key)) {
+          fields[key] = cartFields[key];
+        }
+      }
+      return fields;
+    }
+
+    function pickDetail(details, key, live, saved) {
+      var value = live ? live[key] : undefined;
+      if (value === undefined || value === "") value = saved ? saved[key] : undefined;
+      if (value === undefined || value === null || value === "") return;
+      details[key] = value;
+    }
+
+    /* Live values win; the submit snapshot only fills what is already gone. */
+    function collectDetails(live, saved) {
+      var details = {};
+      for (var i = 0; i < DETAIL_FIELDS.length; i++) {
+        pickDetail(details, DETAIL_FIELDS[i][0], live, saved);
+      }
+      for (var j = 0; j < CART_DETAIL_KEYS.length; j++) {
+        pickDetail(details, CART_DETAIL_KEYS[j], live, saved);
+      }
+      return details;
+    }
+
+    function hasAnyKey(obj) {
+      for (var key in obj) {
+        if (Object.prototype.hasOwnProperty.call(obj, key)) return true;
+      }
+      return false;
+    }
+
     /* Drops the tail of a cart that would not fit into a `keepalive` body. */
     function buildBody(payload) {
       var body = JSON.stringify(payload);
@@ -4030,6 +4129,21 @@ document.addEventListener("DOMContentLoaded", function () {
         document.querySelector('input[name="paymentsystem"]:checked');
       var value = el && el.value ? String(el.value).toLowerCase() : "";
       return value !== "" && value !== "cash";
+    }
+
+    /* Tilda can empty `tcart` and the form fields by the time it calls back,
+       so the same whitelist is also read while the order is still being sent.
+       Passive on purpose: it reads, stores and lets the submit go on. */
+    var savedDetails = null;
+
+    function onSubmitCapture(e) {
+      try {
+        var form = e && e.target;
+        if (!form || form.id !== MAIN_CART_FORM_ID) return;
+        savedDetails = readDetails(form, readCart());
+      } catch (err) {
+        debug("submit read failed", err);
+      }
     }
 
     /* Tilda sets `tildaForm.orderIdForStat` and pushes the purchase to
@@ -4069,6 +4183,8 @@ document.addEventListener("DOMContentLoaded", function () {
           readCookie("utm_source"),
           window.location.search,
         );
+        var details = collectDetails(readDetails(form, cart), savedDetails);
+        if (hasAnyKey(details)) payload.details = details;
         // A URL outgrows a text field, but is still bounded.
         payload.page_url = String(window.location.href).slice(0, 500);
 
@@ -4093,6 +4209,8 @@ document.addEventListener("DOMContentLoaded", function () {
       }
     }
 
+    // Capture phase: the values are read before Tilda's own submit handler.
+    document.addEventListener("submit", onSubmitCapture, true);
     document.addEventListener("tildaform:aftersuccess", onSuccess);
 
     // The pure parts, so `npm test` can check them without a browser.
@@ -4102,6 +4220,9 @@ document.addEventListener("DOMContentLoaded", function () {
       parseTildaUtm: parseTildaUtm,
       collectUtm: collectUtm,
       collectProducts: collectProducts,
+      readFormFields: readFormFields,
+      readCartFields: readCartFields,
+      collectDetails: collectDetails,
       buildBody: buildBody,
     };
   } catch (e) {}
