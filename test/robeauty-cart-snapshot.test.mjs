@@ -5,6 +5,8 @@
  *   bareOrderId / orderIdFromDataLayer -> the order number Tilda announced
  *   parseTildaUtm / collectUtm         -> UTM tags from the TILDAUTM cookie
  *   collectProducts / buildBody        -> the cart lines and the request body
+ *   readFormFields / readCartFields    -> the whitelist that makes up `details`
+ *   collectDetails                     -> live values first, submit snapshot second
  *
  * The block (from the section 12 header to the end of the file) runs in
  * node:vm with a fake window and document. No dependencies: `npm test`.
@@ -19,10 +21,23 @@ const lines = source.split("\n");
 const start = lines.findIndex((l) => l.startsWith("/* ===================== 12. Cart snapshot"));
 const block = lines.slice(start).join("\n");
 
+const asked = [];
+
+class FakeFormData {
+  constructor(form) {
+    if (!form || !form.fields) throw new TypeError("not a form");
+    this.fields = form.fields;
+  }
+  get(name) {
+    asked.push(name);
+    return name in this.fields ? this.fields[name] : null;
+  }
+}
+
 const load = () => {
   const window = { console, location: { href: "https://robeauty.me/cart", search: "" } };
   const document = { cookie: "", addEventListener: () => {} };
-  vm.runInNewContext(block, { window, document, localStorage: { getItem: () => null }, console, JSON, Math, Number, RegExp, String, isFinite, parseInt, decodeURIComponent });
+  vm.runInNewContext(block, { window, document, localStorage: { getItem: () => null }, console, JSON, Math, Number, RegExp, String, isFinite, parseInt, decodeURIComponent, FormData: FakeFormData });
   return window.__rbCartSnapshot;
 };
 
@@ -152,4 +167,88 @@ test("body: fits as it is, or loses the tail of the cart", () => {
   assert.ok(body.length <= 60 * 1024);
   assert.ok(sent.products.length < 300 && sent.products.length > 0);
   assert.equal(sent.utm.utm_source, "instagram"); // the UTMs always survive
+});
+
+/* ---------- details: what the customer typed ---------- */
+
+test("form fields: the whitelist only, trimmed", () => {
+  asked.length = 0;
+  const form = {
+    fields: {
+      name: " Анатолій ",
+      surname: "Коротенко",
+      city: "Київ",
+      address: "Відділення №12",
+      CallOption: "Можна без дзвінка",
+      paymentsystem: "wayforpay",
+      // None of these may ever be read.
+      phone: "+380991112233",
+      Email: "a@b.c",
+      "ma_name": "x",
+      visited_pages: "[]",
+      cart_products: "[]",
+    },
+  };
+  assert.deepEqual(plain(api.readFormFields(form)), {
+    name: "Анатолій",
+    surname: "Коротенко",
+    city: "Київ",
+    address: "Відділення №12",
+    call_option: "Можна без дзвінка",
+    payment_system: "wayforpay",
+  });
+  assert.deepEqual(asked, ["name", "surname", "city", "address", "CallOption", "paymentsystem"]);
+});
+
+test("form fields: empty and missing ones are left out, a broken form gives nothing", () => {
+  assert.deepEqual(plain(api.readFormFields({ fields: { name: "Іван", surname: "   ", city: "" } })), { name: "Іван" });
+  assert.deepEqual(plain(api.readFormFields({ fields: {} })), {});
+  assert.deepEqual(plain(api.readFormFields(null)), {}); // FormData throws
+});
+
+test("cart fields: promo code, delivery name, total from tcart.amount", () => {
+  const cart = {
+    promocode: { promocode: "SALE10", discountpercent: "10" },
+    delivery: { name: "Нова Пошта: відділення", price: 70 },
+    total: 2, // the number of items, not money
+    amount: 1540,
+  };
+  assert.deepEqual(plain(api.readCartFields(cart)), {
+    promocode: "SALE10",
+    delivery: "Нова Пошта: відділення",
+    total: 1540,
+  });
+  // Both fields can also come as plain strings.
+  assert.deepEqual(plain(api.readCartFields({ promocode: "SALE10", delivery: "Самовивіз", amount: "890" })), {
+    promocode: "SALE10",
+    delivery: "Самовивіз",
+    total: 890,
+  });
+});
+
+test("cart fields: a BONUS- pseudo code is not a promo code", () => {
+  // Section 10 puts bonuses into the same slot to show them in the cart.
+  const cart = { promocode: { promocode: "BONUS-ABCDEF123456", discountsum: 99.5 }, amount: 1900.5 };
+  assert.deepEqual(plain(api.readCartFields(cart)), { total: 1900.5 });
+});
+
+test("cart fields: nothing to report", () => {
+  assert.deepEqual(plain(api.readCartFields(null)), {});
+  assert.deepEqual(plain(api.readCartFields({})), {});
+  assert.deepEqual(plain(api.readCartFields({ amount: 0, promocode: {}, delivery: {} })), {});
+  assert.deepEqual(plain(api.readCartFields({ amount: "abc" })), {});
+});
+
+test("details: live values win, the submit snapshot fills the gaps", () => {
+  const live = { name: "Іван", city: "Київ" };
+  const saved = { name: "Старе", surname: "Петренко", city: "", promocode: "SALE10", total: 1540 };
+  assert.deepEqual(plain(api.collectDetails(live, saved)), {
+    name: "Іван",
+    surname: "Петренко",
+    city: "Київ",
+    promocode: "SALE10",
+    total: 1540,
+  });
+  assert.deepEqual(plain(api.collectDetails({}, null)), {});
+  assert.deepEqual(plain(api.collectDetails(null, null)), {});
 });
