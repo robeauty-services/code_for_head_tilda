@@ -68,3 +68,62 @@
   src="https://cdn.jsdelivr.net/gh/robeauty-services/code_for_head_tilda@robeauty-v1.0.29/dist/head.min.js"
   crossorigin="anonymous"
 ></script>
+
+<!-- Cart default CallOption switcher (config in Supabase, managed by sales dept admin page) -->
+<script>
+  (function () {
+    var CFG_URL =
+      "https://wyumatzrvdknhrulghuo.supabase.co/functions/v1/cart-config";
+
+    function applyDefault(mode) {
+      var tries = 0;
+      (function tick() {
+        var inputs = document.querySelectorAll(
+          '.t706 input[type="radio"][name="CallOption"]'
+        );
+        if (!inputs.length) {
+          if (++tries < 40) return setTimeout(tick, 250);
+          return;
+        }
+        var target = null;
+        Array.prototype.forEach.call(inputs, function (inp) {
+          var v = (inp.value || "").toLowerCase();
+          if (mode === "call_me" && v.indexOf("передзвон") !== -1) target = inp;
+          if (mode === "no_call" && v.indexOf("без дзвінка") !== -1) target = inp;
+        });
+        if (!target) return;
+        if (!target.checked) {
+          target.checked = true;
+          try {
+            target.dispatchEvent(new Event("change", { bubbles: true }));
+          } catch (e) {}
+        }
+        // переносимо дефолтний пункт на перше місце
+        var label = target.closest ? target.closest("label") : null;
+        var wrap = label && label.parentElement;
+        if (wrap && wrap.firstElementChild !== label) {
+          wrap.insertBefore(label, wrap.firstElementChild);
+        }
+      })();
+    }
+
+    function start() {
+      fetch(CFG_URL, { cache: "no-store" })
+        .then(function (r) {
+          return r.json();
+        })
+        .then(function (d) {
+          if (d && (d.value === "no_call" || d.value === "call_me")) {
+            applyDefault(d.value);
+          }
+        })
+        .catch(function () {});
+    }
+
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", start);
+    } else {
+      start();
+    }
+  })();
+</script>
