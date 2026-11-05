@@ -264,6 +264,58 @@ document.addEventListener("DOMContentLoaded", function () {
     "00-00003660": "443496223164",
     "00-00003257": "899642914484",
   };
+
+  // Номери з map_content_ids, яких в об'єкті не видно: перекриті дублем ключа
+  // (діє останній) або закоментовані. Лише для зворотного пошуку номер ->
+  // артикул (editionuid в адресі), номер товару в подіях вони не змінюють.
+  // Тест звіряє: кожен номер із map_content_ids має знаходити свій артикул.
+  var sku_by_shadowed_content_id = {
+    "942636082012": "00-00000093",
+    "649814181142": "00-00000076",
+    "333692312741": "00-00000078",
+    "461817883112": "00-00000078",
+    "931790046321": "00-00000077",
+    "390918189862": "00-00000077",
+    "125411414841": "00-00000074",
+    "542221407911": "00-00000175",
+    "567504993151": "00-00000033",
+    "663262224272": "00-00000033",
+    "851649488531": "00-00000032",
+    "931024551392": "00-00000032",
+    "857010826932": "00-00000038",
+    "516450418172": "00-00000017",
+    "841655979411": "00-00000029",
+    "193806475052": "00-00000108",
+    "438513527422": "00-00000018",
+    "357979175422": "00-00002556",
+    "440622966132": "00-00002556",
+    "903901889922": "00-00002555",
+    "944701541962": "00-00000082",
+    "814044459622": "00-00000003",
+    "794718671332": "00-00000080",
+    "896488751502": "00-00000079",
+    "582868608712": "00-00000008",
+    "704990764962": "00-00000010",
+    "299483988572": "00-00000010",
+    "197253366962": "00-00000220",
+    "857800697002": "00-00002526",
+    "943775441262": "00-00002523",
+    "353422803702": "00-00000222",
+    "469724832252": "00-00000222",
+    "932752988012": "00-00000222",
+    "700922247062": "00-00000202",
+    "667320575742": "00-00000202",
+    "814017912312": "00-00000202",
+    "317610299122": "00-00002530",
+    "515837234692": "00-00002530",
+    "860829398982": "00-00000598",
+    "643302860924": "00-00003113",
+    "439681700564": "00-00003113",
+    "582701226804": "00-00003113",
+    "295050245394": "00-00002536",
+    "533585108994": "00-00002536",
+    "181040562504": "00-00002536",
+  };
   // =========================================================================
   // 2. ГЛОБАЛЬНЫЕ ФУНКЦИИ-ПОМОЩНИКИ (HELPERS)
   // =========================================================================
@@ -372,6 +424,27 @@ document.addEventListener("DOMContentLoaded", function () {
   // contents, і серверна копія TikTok рахувала суму без нього.
   var contentIdForSku = (sku) => (sku ? map_content_ids[sku] || sku : null);
 
+  // Артикул окремим токеном у полі SKU: "Код товару: 00-00000103" ->
+  // "00-00000103", "KU-0003382" -> "KU-0003382". У блоках t744 поле SKU буває
+  // просто підписом ("Об'єм: 250 ml") — тоді null, а не підпис як номер товару.
+  var skuToken = (s) => {
+    var m = /(?:^|[^A-Za-z0-9])([A-Za-z0-9]{2}-\d{5,})(?![A-Za-z0-9])/.exec(
+      String(s || ""),
+    );
+    return m ? m[1] : null;
+  };
+
+  // Зворотний пошук: номер товару -> артикул (для editionuid=<номер> в адресі).
+  // Спершу номери, перекриті дублем ключа в map_content_ids (діє останній) або
+  // закоментовані, — їх в об'єкті не видно; далі сам map_content_ids.
+  var skuForContentId = (id) => {
+    if (!id) return null;
+    id = String(id);
+    if (sku_by_shadowed_content_id[id]) return sku_by_shadowed_content_id[id];
+    for (var k in map_content_ids) if (map_content_ids[k] === id) return k;
+    return null;
+  };
+
   // Единый парсер корзины Тильды (устраняет дублирование кода для IC и Purchase)
   var parseTildaCartData = (cartObj) => {
     var result = {
@@ -390,7 +463,7 @@ document.addEventListener("DOMContentLoaded", function () {
       var id = elem.uid;
       if (!id) {
         id = contentIdForSku(
-          skuFromName(elem.name) || (elem.sku ? String(elem.sku).trim() : null),
+          skuFromName(elem.name) || skuToken(elem.sku),
         );
       }
 
@@ -818,17 +891,20 @@ document.addEventListener("DOMContentLoaded", function () {
       var name = (lastEq !== -1 ? mainPart.substring(0, lastEq) : mainPart)
         .split(/(?:\[sku:|\()/)[0]
         .trim();
+      var sku = skuFromName(mainPart);
       return {
-        id: contentIdForSku(skuFromName(mainPart)),
+        id: contentIdForSku(sku),
+        sku: sku,
         price: price,
         name: name || "Unknown Product",
       };
     };
 
-    // Картка товару Тільди (t-store, t744, t762, t766) -> товар.
+    // Картка товару Тільди (t-store, t744, t762, t766) -> товар. Поле SKU
+    // у t744 буває підписом ("Об'єм: 250 ml") — береться лише артикул із нього.
     var productFromCard = (card) => {
       var skuEl = card.querySelector(".js-product-sku, .js-store-prod-sku");
-      var sku = skuEl ? skuEl.textContent.trim() : "";
+      var sku = (skuEl && skuToken(skuEl.textContent)) || "";
       var id =
         (sku && map_content_ids[sku]) ||
         card.getAttribute("data-product-uid") ||
@@ -850,6 +926,7 @@ document.addEventListener("DOMContentLoaded", function () {
       }
       return {
         id: String(id),
+        sku: sku || null,
         price: price,
         name: (nameEl && nameEl.textContent.trim()) || "Unknown Product",
       };
@@ -859,11 +936,26 @@ document.addEventListener("DOMContentLoaded", function () {
     // допродаж (SPF, тонер), а не товар сторінки. Порядок:
     //   1. editionuid в адресі — це номер товару в каталозі;
     //   2. картка товару на самій сторінці (не в поп-апі);
-    //   3. кнопки "#order:": артикул, що трапляється найчастіше (кнопка товару
-    //      сторінки стоїть у кількох місцях, допродаж — раз); порівну — перша;
-    //   4. картка в поп-апі (t766 «#popup:addproduct…» — часто допродаж,
+    //   3. перша кнопка "#order:" поза блоком «Разом купують» (класи з
+    //      fbt / xcard / pair / comp(s) у предків — там лежать допродажі);
+    //   4. артикул, що трапляється в кнопках найчастіше; порівну — перший;
+    //   5. картка в поп-апі (t766 «#popup:addproduct…» — часто допродаж,
     //      напр. «Набор 3-х», тому лише коли кнопок немає), далі перша кнопка.
     // Ціна й назва — того самого товару.
+    var XSELL_CLASS = /(^|[-_])(fbt|xcard|pair|comps?)([-_]|$)/;
+    var inCrossSell = (el) => {
+      for (
+        var e = el.parentElement;
+        e && e !== document.body;
+        e = e.parentElement
+      ) {
+        var cls =
+          typeof e.className === "string" ? e.className.split(/\s+/) : [];
+        if (cls.some((c) => XSELL_CLASS.test(c))) return true;
+      }
+      return false;
+    };
+
     var pickViewedProduct = () => {
       var cards = [];
       document
@@ -885,8 +977,41 @@ document.addEventListener("DOMContentLoaded", function () {
       var buttons = [];
       document.querySelectorAll('a[href^="#order:"]').forEach((btn) => {
         var p = productFromOrderButton(btn);
-        if (p) buttons.push(p);
+        if (p) {
+          p.xsell = inCrossSell(btn);
+          buttons.push(p);
+        }
       });
+
+      // editionuid: ціна й назва — лише цього товару (за номером, далі за
+      // артикулом через зворотний пошук). Не знайшли — 0 і без назви, а не
+      // ціна й назва іншого товару сторінки.
+      var edition = /[?&]editionuid=(\d+)/.exec(window.location.search || "");
+      if (edition) {
+        var eid = edition[1];
+        var eidSku = skuForContentId(eid);
+        var cardWith = (test) => {
+          var c = cards.find(test);
+          return c ? c.p : null;
+        };
+        var same =
+          cardWith(
+            (c) =>
+              c.p.id === eid || c.el.getAttribute("data-product-uid") === eid,
+          ) ||
+          buttons.find((b) => b.id === eid) ||
+          (eidSku &&
+            (cardWith((c) => c.p.sku === eidSku) ||
+              buttons.find((b) => b.sku === eidSku))) ||
+          null;
+        return {
+          id: eid,
+          price: same ? same.price : 0,
+          name: same ? same.name : "Unknown Product",
+        };
+      }
+
+      var firstOwn = buttons.find((b) => b.id && !b.xsell) || null;
       var counts = {};
       var topButton = null;
       buttons.forEach((b) => {
@@ -898,31 +1023,13 @@ document.addEventListener("DOMContentLoaded", function () {
           topButton = b;
       });
 
-      var main =
+      return (
         (inPage[0] && inPage[0].p) ||
+        firstOwn ||
         topButton ||
         (cards[0] && cards[0].p) ||
-        buttons[0] ||
-        null;
-
-      var edition = /[?&]editionuid=(\d+)/.exec(window.location.search || "");
-      if (edition) {
-        var eid = edition[1];
-        var sameCard = cards.find(
-          (c) =>
-            c.p.id === eid || c.el.getAttribute("data-product-uid") === eid,
-        );
-        var same =
-          (sameCard && sameCard.p) ||
-          buttons.find((b) => b.id === eid) ||
-          main;
-        return {
-          id: eid,
-          price: same ? same.price : 0,
-          name: same ? same.name : "Unknown Product",
-        };
-      }
-      return main || { id: null, price: 0, name: "Unknown Product" };
+        buttons[0] || { id: null, price: 0, name: "Unknown Product" }
+      );
     };
 
     if (isProductPage()) {
