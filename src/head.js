@@ -128,7 +128,7 @@ document.addEventListener("DOMContentLoaded", function () {
     "00-00000108": "622416358582",
     "00-00000022": "365054045312",
     "00-00000018": "457399131532",
-    "00-00000018": "438513527422",
+    // "00-00000018": "438513527422", // дубль ключа; номера немає у feed-fb.csv, діє 457399131532 (є у фіді) — 05.11.2026
     "00-00000021": "230320967922",
     "00-00000098": "741402171492",
     "00-00000099": "971040557842",
@@ -253,12 +253,14 @@ document.addEventListener("DOMContentLoaded", function () {
     "00-00003403": "839144944974",
     "00-00003241": "997047369464",
     "00-00003487": "829534658724",
-    "00-00003113": "643302860924",
-    "00-00003113": "439681700564",
-    "00-00003113": "582701226804",
-    "00-00002536": "295050245394",
-    "00-00002536": "533585108994",
-    "00-00002536": "181040562504",
+    // Дублі ключів 00-00003113 і 00-00002536: цих номерів немає у feed-fb.csv,
+    // діють 694245873222 і 624341789722 вище (є у фіді) — 05.11.2026.
+    // "00-00003113": "643302860924",
+    // "00-00003113": "439681700564",
+    // "00-00003113": "582701226804",
+    // "00-00002536": "295050245394",
+    // "00-00002536": "533585108994",
+    // "00-00002536": "181040562504",
     "00-00003660": "443496223164",
     "00-00003257": "899642914484",
   };
@@ -355,6 +357,21 @@ document.addEventListener("DOMContentLoaded", function () {
     };
   };
 
+  // Артикул із назви товару: "[sku:00-00000114]" або "[sku:KU-0003382]" —
+  // з літерами. Старий формат у дужках "(00-00000114)" — лише цифри: у дужках
+  // бувають і "(medium)", "(light)", "(30мл)", вони не артикули.
+  var skuFromName = (name) => {
+    var s = String(name || "");
+    var m =
+      s.match(/\[sku:\s*([A-Za-z0-9-]+)\s*\]/) || s.match(/\(([0-9-]+)\)/);
+    return m ? m[1] : null;
+  };
+
+  // Артикул -> номер товару в каталозі. Артикул, якого немає в map_content_ids
+  // (напр. KU-0003413), лишається номером сам — раніше такий товар випадав із
+  // contents, і серверна копія TikTok рахувала суму без нього.
+  var contentIdForSku = (sku) => (sku ? map_content_ids[sku] || sku : null);
+
   // Единый парсер корзины Тильды (устраняет дублирование кода для IC и Purchase)
   var parseTildaCartData = (cartObj) => {
     var result = {
@@ -372,8 +389,9 @@ document.addEventListener("DOMContentLoaded", function () {
 
       var id = elem.uid;
       if (!id) {
-        var match = elem.name.match(/(?:\[sku:|\()([0-9-]+)(?:\]|\))/);
-        if (match && match[1]) id = map_content_ids[match[1]] || match[1];
+        id = contentIdForSku(
+          skuFromName(elem.name) || (elem.sku ? String(elem.sku).trim() : null),
+        );
       }
 
       if (id) {
@@ -641,12 +659,9 @@ document.addEventListener("DOMContentLoaded", function () {
         var rawId = Array.isArray(data.content_ids)
           ? String(data.content_ids[0])
           : String(data.content_ids);
-        var match = rawId.match(/(?:\[sku:|\()([0-9-]+)(?:\]|\))/);
         content_id = /^\d+$/.test(rawId)
           ? rawId
-          : match
-            ? map_content_ids[match[1]] || null
-            : null;
+          : contentIdForSku(skuFromName(rawId));
       }
 
       var itemValue = Number(data.value) || 0;
@@ -689,7 +704,11 @@ document.addEventListener("DOMContentLoaded", function () {
         },
         {
           eventId: eventId,
-          user: { email: atcUser.email, phone: atcUser.phone },
+          user: {
+            email: atcUser.email,
+            phone: atcUser.phone,
+            external_id: getExternalId(atcUser.phone),
+          },
           server: true,
         },
       );
@@ -751,83 +770,167 @@ document.addEventListener("DOMContentLoaded", function () {
     }
 
     // --- VIEWCONTENT ---
+    // Лише шлях адреси, по сегментах і цілих словах у них. Раніше перевірялась
+    // уся адреса разом із query, тож utm_campaign=CBO_TEST чи CREO_TESTING
+    // вимикали ViewContent (Meta, CAPI, TikTok, GA4) на будь-якій сторінці
+    // товару. Слово може мати цифри в кінці: thanks1, footer1.
     var isProductPage = () => {
-      var url = window.location.href.toLowerCase();
-      if (window.location.pathname === "/" || window.location.pathname === "")
-        return false;
+      var segments = String(window.location.pathname || "/")
+        .toLowerCase()
+        .split("/")
+        .filter(Boolean);
+      if (!segments.length) return false;
+      // Каталог /products (з фільтрами ?tfc… чи без), але не /products/tproduct/…
+      if (segments.length === 1 && segments[0] === "products") return false;
       var excludes = [
-        "products?",
         "gift-certificates",
         "b2b-partners",
         "about-us",
         "season-sale",
         "morning",
         "test",
-        "footer1",
+        "testboard",
+        "cosmetics-testing",
+        "footer",
         "header",
         "thanks",
         "thx-claude",
         "showtockers",
       ];
-      return !excludes.some((ex) => url.includes(ex));
+      return !segments.some((seg) =>
+        excludes.some((ex) =>
+          new RegExp("(^|[-_])" + ex + "\\d*($|[-_])").test(seg),
+        ),
+      );
+    };
+
+    // Кнопка "#order:Назва [sku:…]=ціна:::image=…" -> товар.
+    var productFromOrderButton = (btn) => {
+      var mainPart = (btn.getAttribute("href") || "").split("#order:")[1];
+      mainPart = mainPart ? mainPart.split(":::")[0] : "";
+      try {
+        mainPart = decodeURIComponent(mainPart);
+      } catch (e) {}
+      if (!mainPart) return null;
+      var lastEq = mainPart.lastIndexOf("=");
+      var price =
+        lastEq !== -1 ? Number(mainPart.substring(lastEq + 1)) || 0 : 0;
+      var name = (lastEq !== -1 ? mainPart.substring(0, lastEq) : mainPart)
+        .split(/(?:\[sku:|\()/)[0]
+        .trim();
+      return {
+        id: contentIdForSku(skuFromName(mainPart)),
+        price: price,
+        name: name || "Unknown Product",
+      };
+    };
+
+    // Картка товару Тільди (t-store, t744, t762, t766) -> товар.
+    var productFromCard = (card) => {
+      var skuEl = card.querySelector(".js-product-sku, .js-store-prod-sku");
+      var sku = skuEl ? skuEl.textContent.trim() : "";
+      var id =
+        (sku && map_content_ids[sku]) ||
+        card.getAttribute("data-product-uid") ||
+        sku;
+      if (!id) return null;
+      var nameEl = card.querySelector(".js-product-name, .js-store-prod-name");
+      // Ціна: data-product-price-def, запасний варіант — текст.
+      var priceEl = card.querySelector(
+        ".js-product-price, .js-store-prod-price-val",
+      );
+      var price = 0;
+      if (priceEl) {
+        var defPrice = priceEl.getAttribute("data-product-price-def");
+        price = defPrice
+          ? Number(defPrice) || 0
+          : parseFloat(
+              priceEl.textContent.replace(/\s/g, "").replace(",", "."),
+            ) || 0;
+      }
+      return {
+        id: String(id),
+        price: price,
+        name: (nameEl && nameEl.textContent.trim()) || "Unknown Product",
+      };
+    };
+
+    // Який товар дивляться. Перша кнопка "#order:" на сторінці часто —
+    // допродаж (SPF, тонер), а не товар сторінки. Порядок:
+    //   1. editionuid в адресі — це номер товару в каталозі;
+    //   2. картка товару на самій сторінці (не в поп-апі);
+    //   3. кнопки "#order:": артикул, що трапляється найчастіше (кнопка товару
+    //      сторінки стоїть у кількох місцях, допродаж — раз); порівну — перша;
+    //   4. картка в поп-апі (t766 «#popup:addproduct…» — часто допродаж,
+    //      напр. «Набор 3-х», тому лише коли кнопок немає), далі перша кнопка.
+    // Ціна й назва — того самого товару.
+    var pickViewedProduct = () => {
+      var cards = [];
+      document
+        .querySelectorAll(
+          [
+            ".t-store__product-snippet",
+            ".t744 .js-product",
+            ".t762 .js-product",
+            ".t766 .js-product",
+            ".t766__container",
+          ].join(", "),
+        )
+        .forEach((el) => {
+          var p = productFromCard(el);
+          if (p) cards.push({ el: el, p: p });
+        });
+      var inPage = cards.filter((c) => !c.el.closest(".t-popup"));
+
+      var buttons = [];
+      document.querySelectorAll('a[href^="#order:"]').forEach((btn) => {
+        var p = productFromOrderButton(btn);
+        if (p) buttons.push(p);
+      });
+      var counts = {};
+      var topButton = null;
+      buttons.forEach((b) => {
+        if (!b.id) return;
+        counts[b.id] = (counts[b.id] || 0) + 1;
+      });
+      buttons.forEach((b) => {
+        if (b.id && (!topButton || counts[b.id] > counts[topButton.id]))
+          topButton = b;
+      });
+
+      var main =
+        (inPage[0] && inPage[0].p) ||
+        topButton ||
+        (cards[0] && cards[0].p) ||
+        buttons[0] ||
+        null;
+
+      var edition = /[?&]editionuid=(\d+)/.exec(window.location.search || "");
+      if (edition) {
+        var eid = edition[1];
+        var sameCard = cards.find(
+          (c) =>
+            c.p.id === eid || c.el.getAttribute("data-product-uid") === eid,
+        );
+        var same =
+          (sameCard && sameCard.p) ||
+          buttons.find((b) => b.id === eid) ||
+          main;
+        return {
+          id: eid,
+          price: same ? same.price : 0,
+          name: same ? same.name : "Unknown Product",
+        };
+      }
+      return main || { id: null, price: 0, name: "Unknown Product" };
     };
 
     if (isProductPage()) {
       setTimeout(() => {
-        var id = null;
-        var price = 0;
-        var itemName = "Unknown Product";
-
-        var orderBtn = document.querySelector('a[href^="#order:"]');
-        if (orderBtn) {
-          var mainPart = orderBtn
-            .getAttribute("href")
-            .split("#order:")[1]
-            ?.split(":::")[0];
-          if (mainPart) {
-            var lastEq = mainPart.lastIndexOf("=");
-            if (lastEq !== -1)
-              price = Number(mainPart.substring(lastEq + 1)) || 0;
-
-            var match = mainPart.match(/(?:\[sku:|\()([0-9-]+)(?:\]|\))/);
-            var rawSku = match && match[1] ? match[1] : null;
-            if (rawSku) id = map_content_ids[rawSku] || rawSku;
-
-            var extractedName = mainPart.split(/(?:\[sku:|\()/)[0].trim();
-            if (extractedName) itemName = extractedName;
-          }
-        }
-
-        // вариант для лендов с новым типом добавления в корзину
-        if (!id) {
-          var container766 = document.querySelector(".t766__container");
-          if (container766) {
-            // Имя
-            var nameEl = container766.querySelector(".js-product-name");
-            if (nameEl) itemName = nameEl.textContent.trim();
-
-            // SKU + Маппинг
-            var skuEl = container766.querySelector(".js-product-sku");
-            if (skuEl) {
-              var rawSku2 = skuEl.textContent.trim();
-              id = map_content_ids[rawSku2] || rawSku2;
-            }
-
-            // Цена (приоритет у атрибута data-product-price-def, запасной вариант - очистка текста)
-            var priceEl = container766.querySelector(".js-product-price");
-            if (priceEl) {
-              var defPrice = priceEl.getAttribute("data-product-price-def");
-              if (defPrice) {
-                price = Number(defPrice) || 0;
-              } else {
-                price =
-                  parseFloat(
-                    priceEl.textContent.replace(/\s/g, "").replace(",", "."),
-                  ) || 0;
-              }
-            }
-          }
-        }
+        var viewed = pickViewedProduct();
+        var id = viewed.id;
+        var price = viewed.price;
+        var itemName = viewed.name;
 
         var contentIds = id ? [String(id)] : [];
         var vcEventId = generateEventId("vc");
@@ -960,6 +1063,7 @@ document.addEventListener("DOMContentLoaded", function () {
               user: {
                 email: serverUserData.email,
                 phone: serverUserData.phone,
+                external_id: getExternalId(serverUserData.phone),
               },
               server: true,
             },
@@ -1115,7 +1219,16 @@ document.addEventListener("DOMContentLoaded", function () {
             eventId: data.eventId,
             eventTime: data.event_time,
             pageUrl: data.event_source_url,
-            user: { email: data.emailInput, phone: data.phoneInput },
+            // Номер замовлення Тільди — той самий transaction_id, що в GA4.
+            orderId: data.orderId,
+            // ttclid на момент оформлення: онлайн-оплата підтверджується
+            // пізніше, коли кука пікселя TikTok (24 год) могла вже зникнути.
+            ttclid: data.ttclid,
+            user: {
+              email: data.emailInput,
+              phone: data.phoneInput,
+              external_id: data.external_id || getExternalId(data.phoneInput),
+            },
             server: true,
           },
         );
@@ -1209,6 +1322,12 @@ document.addEventListener("DOMContentLoaded", function () {
           event_source_url: window.location.href,
           client_user_agent: navigator.userAgent,
           external_id: getExternalId(phoneInput), // Безопасный вызов (phoneInput уже объявлен)
+          // Для відкладеного Purchase TikTok (секція 4).
+          ttclid:
+            (window.rbTikTok &&
+              window.rbTikTok.getTtclid &&
+              window.rbTikTok.getTtclid()) ||
+            "",
         };
 
         localStorage.setItem("rb_meta_pending", JSON.stringify(dataObj));
@@ -1337,10 +1456,22 @@ document.addEventListener("DOMContentLoaded", function () {
    Events API token). TikTok merges the two copies by event_id. ViewContent is
    browser-only: it is the high-volume one and nobody optimises on it.
 
+   The relay body carries what the pixel got: explicit value and currency (the
+   relay used to sum contents, and contents can miss items or ignore cart
+   discounts), the hashed external_id that Meta gets (last 10 phone digits),
+   ttclid, and for Purchase the Tilda order number GA4 uses as transaction_id.
+
+   ttclid: the TikTok pixel keeps its own `ttclid` cookie for 24 hours only, and
+   an online payment can be confirmed later than that. So every page that opens
+   with ?ttclid= saves it first-party for 28 days (cookie rb_ttclid +
+   localStorage), and section 3 copies it into rb_meta_pending at checkout.
+
    GTM tag «ATC_TT» skips itself once `window.rbTikTok` exists. */
 (function () {
   var RELAY_URL =
     "https://payment-handler.site/webhooks/tiktok_capi/tt_capi.php";
+  var TTCLID_KEY = "rb_ttclid";
+  var TTCLID_DAYS = 28;
 
   var sha256 = function (str) {
     try {
@@ -1379,7 +1510,20 @@ document.addEventListener("DOMContentLoaded", function () {
 
   var getCookie = function (name) {
     var m = document.cookie.match(new RegExp("(?:^|; )" + name + "=([^;]*)"));
-    return m ? decodeURIComponent(m[1]) : undefined;
+    if (!m) return undefined;
+    try {
+      return decodeURIComponent(m[1]);
+    } catch (e) {
+      return m[1];
+    }
+  };
+
+  /* Meta's external_id (section 3: last 10 phone digits), hashed. A value that
+     already is a SHA-256 hex stays as it is. */
+  var hashExternalId = function (id) {
+    var s = String(id == null ? "" : id).trim();
+    if (/^[a-f0-9]{64}$/i.test(s)) return Promise.resolve(s.toLowerCase());
+    return sha256(s);
   };
 
   var hashUser = function (user) {
@@ -1387,15 +1531,115 @@ document.addEventListener("DOMContentLoaded", function () {
     return Promise.all([
       sha256(normEmail(user.email)),
       sha256(normPhone(user.phone)),
+      hashExternalId(user.external_id),
     ]).then(function (h) {
-      return { email: h[0], phone: h[1] };
+      return { email: h[0], phone: h[1], external_id: h[2] };
     });
   };
 
+  /* ---------- ttclid ---------- */
+
+  var cleanTtclid = function (v) {
+    var s = String(v == null ? "" : v).trim();
+    return s && s.length <= 500 && /^[^\s;,"'\\<>]+$/.test(s) ? s : "";
+  };
+
+  /* .robeauty.me for robeauty.me and www.robeauty.me; nothing on localhost or
+     an IP, where a domain attribute would make the browser drop the cookie. */
+  var cookieDomain = function () {
+    var loc = window.location || {};
+    var fromHref = /^https?:\/\/([^\/?#:]+)/i.exec(loc.href || "");
+    var host = String(
+      loc.hostname || (fromHref && fromHref[1]) || "",
+    ).toLowerCase();
+    if (host.indexOf(".") < 0 || /^[\d.]+$/.test(host)) return "";
+    var p = host.split(".");
+    var n =
+      p.length > 2 &&
+      p[p.length - 1].length === 2 &&
+      /^(com|net|org|co|gov|edu)$/.test(p[p.length - 2])
+        ? 3
+        : 2;
+    return "." + p.slice(-n).join(".");
+  };
+
+  var saveTtclid = function (v) {
+    try {
+      var domain = cookieDomain();
+      document.cookie =
+        TTCLID_KEY +
+        "=" +
+        encodeURIComponent(v) +
+        "; max-age=" +
+        TTCLID_DAYS * 24 * 60 * 60 +
+        "; path=/; SameSite=Lax" +
+        (domain ? "; domain=" + domain : "");
+    } catch (e) {}
+    try {
+      window.localStorage.setItem(
+        TTCLID_KEY,
+        JSON.stringify({ v: v, ts: Date.now() }),
+      );
+    } catch (e) {}
+  };
+
+  /* A fresh click (?ttclid= in this page's address) wins over a stored one. */
+  var captureTtclid = function () {
+    try {
+      var loc = window.location || {};
+      var query =
+        loc.search != null
+          ? loc.search
+          : String(loc.href || "").replace(/^[^?]*/, "").replace(/#.*$/, "");
+      var m = /[?&]ttclid=([^&#]*)/.exec(query);
+      if (!m) return;
+      var v = m[1];
+      try {
+        v = decodeURIComponent(v);
+      } catch (e) {}
+      v = cleanTtclid(v);
+      if (v) saveTtclid(v);
+    } catch (e) {}
+  };
+
+  /* rb_ttclid (cookie, then localStorage) -> the pixel's own ttclid cookie ->
+     sessionStorage tt_adInfo, which the pixel fills from the ad click. */
+  var getTtclid = function () {
+    var v = cleanTtclid(getCookie(TTCLID_KEY));
+    if (v) return v;
+    try {
+      var saved = JSON.parse(
+        window.localStorage.getItem(TTCLID_KEY) || "null",
+      );
+      if (
+        saved &&
+        typeof saved.ts === "number" &&
+        Date.now() - saved.ts < TTCLID_DAYS * 24 * 60 * 60 * 1000
+      ) {
+        v = cleanTtclid(saved.v);
+        if (v) return v;
+      }
+    } catch (e) {}
+    v = cleanTtclid(getCookie("ttclid"));
+    if (v) return v;
+    try {
+      var info = JSON.parse(
+        window.sessionStorage.getItem("tt_adInfo") || "null",
+      );
+      if (info && typeof info === "object") {
+        v = cleanTtclid(info.ttclid || info.callback);
+        if (v) return v;
+      }
+    } catch (e) {}
+    return "";
+  };
+
+  captureTtclid();
+
   /* data:  { contents: [{ content_id, content_name, price, quantity }],
               value, currency }
-     opts:  { eventId, user: { email, phone } (plain), server, eventTime,
-              pageUrl } */
+     opts:  { eventId, user: { email, phone, external_id } (plain), server,
+              eventTime, pageUrl, orderId, ttclid } */
   var track = function (event, data, opts) {
     data = data || {};
     opts = opts || {};
@@ -1411,7 +1655,10 @@ document.addEventListener("DOMContentLoaded", function () {
         var identity = {};
         if (hashed.email) identity.email = hashed.email;
         if (hashed.phone) identity.phone_number = hashed.phone;
-        if (identity.email || identity.phone_number) ttq.identify(identity);
+        if (hashed.external_id) identity.external_id = hashed.external_id;
+        if (identity.email || identity.phone_number || identity.external_id) {
+          ttq.identify(identity);
+        }
 
         var props = { contents: contents, currency: currency };
         if (contents.length) props.content_type = "product";
@@ -1421,7 +1668,9 @@ document.addEventListener("DOMContentLoaded", function () {
         ttq.track(event, props, { event_id: opts.eventId });
 
         if (!opts.server) return;
-        // The relay sums value from contents and reads currency per item.
+        var ttclid = cleanTtclid(opts.ttclid) || getTtclid();
+        // value / currency: the same numbers the pixel got. The relay sums
+        // contents only when value is missing (older bundles).
         fetch(RELAY_URL, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1429,6 +1678,10 @@ document.addEventListener("DOMContentLoaded", function () {
             event: event,
             event_id: opts.eventId,
             event_time: eventTime,
+            value: props.value,
+            currency: currency,
+            order_id: opts.orderId ? String(opts.orderId) : undefined,
+            ttclid: ttclid || undefined,
             context: {
               page: { url: pageUrl },
               user_agent: navigator.userAgent,
@@ -1436,7 +1689,9 @@ document.addEventListener("DOMContentLoaded", function () {
             user: {
               email: hashed.email || undefined,
               phone: hashed.phone || undefined,
+              external_id: hashed.external_id || undefined,
               ttp: getCookie("_ttp"),
+              ttclid: ttclid || undefined,
             },
             contents: contents.map(function (c) {
               return {
@@ -1456,7 +1711,7 @@ document.addEventListener("DOMContentLoaded", function () {
       });
   };
 
-  window.rbTikTok = { track: track };
+  window.rbTikTok = { track: track, getTtclid: getTtclid };
 })();
 
 /* ===================== 5. Save basket and user data ===================== */
