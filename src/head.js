@@ -503,7 +503,33 @@ document.addEventListener("DOMContentLoaded", function () {
     return parts.length >= 4 ? parts.slice(2).join(".") : gaCookie;
   };
 
+  // session_id из cookie потока G-GNEFTDXVHT — без него серверные события
+  // (view_cart, begin_checkout, view_item…) не склеиваются с сессией в GA4 и
+  // остаются без источника / лендинга. Форматы: GS1.1.<sid>.<n>… и
+  // GS2.1.s<sid>$o<n>$g…
+  var getGaSessionId = () => {
+    var c = getCookie("_ga_GNEFTDXVHT");
+    if (!c) return null;
+    var m = /^GS2\.\d+\.(.*)$/.exec(c);
+    if (m) {
+      var seg = m[1].split("$").find((s) => s.charAt(0) === "s");
+      var sid = seg ? seg.slice(1) : "";
+      return /^\d+$/.test(sid) ? sid : null;
+    }
+    var parts = c.split(".");
+    return parts.length > 2 && /^\d+$/.test(parts[2]) ? parts[2] : null;
+  };
+
   var sendToGoogle = (endpoint, payload) => {
+    var sessionId = getGaSessionId();
+    if (sessionId && Array.isArray(payload.events)) {
+      payload.events.forEach((ev) => {
+        ev.params = ev.params || {};
+        if (ev.params.session_id == null) ev.params.session_id = sessionId;
+        if (ev.params.engagement_time_msec == null)
+          ev.params.engagement_time_msec = 1;
+      });
+    }
     fetch(GOOGLE_URL + endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1119,14 +1145,25 @@ document.addEventListener("DOMContentLoaded", function () {
     }
 
     // --- INITIATE CHECKOUT (Focus Event) ---
+    // Флаг «оформление уже начато» живёт 30 минут (как сессия GA4). Раньше он
+    // хранил "true" до покупки: кто начал оформление, ушёл и вернулся через день,
+    // больше не давал begin_checkout / InitiateCheckout, и шаг недосчитывал
+    // возвраты (purchase / begin_checkout вырос с ~79% до 85–89% к 4.11.2026).
+    // Старое значение "true" не число — считается протухшим.
+    var CHECKOUT_FLAG_TTL_MS = 30 * 60 * 1000;
+    var checkoutAlreadyStarted = () => {
+      var ts = Number(localStorage.getItem("fb_capi_initial_checkout"));
+      return ts > 0 && Date.now() - ts < CHECKOUT_FLAG_TTL_MS;
+    };
+
     var handleCheckoutFocus = (e) => {
-      if (localStorage.getItem("fb_capi_initial_checkout") === "true") return;
+      if (checkoutAlreadyStarted()) return;
       if (e.target.closest(".t706__orderform")) {
         try {
           var cart = JSON.parse(localStorage.getItem("tcart") || "{}");
           if (!cart.products || cart.products.length === 0) return;
 
-          localStorage.setItem("fb_capi_initial_checkout", "true");
+          localStorage.setItem("fb_capi_initial_checkout", String(Date.now()));
           document.removeEventListener("focusin", handleCheckoutFocus);
 
           var parsedCart = parseTildaCartData(cart);
@@ -1203,6 +1240,11 @@ document.addEventListener("DOMContentLoaded", function () {
     document.addEventListener("focusin", handleCheckoutFocus);
 
     // --- GOOGLE VIEW_CART (Оптимальное решение: наблюдение за <body>) ---
+    // Не на странице благодарности: там корзину открывает блок апсела, а не
+    // покупатель, и view_cart завышал шаг воронки (255 событий за 4.11.2026).
+    var skipViewCart =
+      window.location.href.includes("thanks") ||
+      window.location.href.includes("thx-claude");
     var isCartOpen = false;
     var bodyObserver = new MutationObserver((mutations) => {
       mutations.forEach((mutation) => {
@@ -1213,6 +1255,7 @@ document.addEventListener("DOMContentLoaded", function () {
 
           if (hasCartClass && !isCartOpen) {
             isCartOpen = true; // Корзина открылась
+            if (skipViewCart) return;
 
             setTimeout(() => {
               // Ждем 300мс для финального обновления localStorage 'tcart'
