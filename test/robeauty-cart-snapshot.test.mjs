@@ -7,9 +7,12 @@
  *   collectProducts / buildBody        -> the cart lines and the request body
  *   readFormFields / readCartFields    -> the whitelist that makes up `details`
  *   collectDetails                     -> live values first, submit snapshot second
+ *   payLinkFor                         -> the /payment-result token for this order
  *
- * The block (from the section 12 header to the end of the file) runs in
- * node:vm with a fake window and document. No dependencies: `npm test`.
+ * The block (from the section 12 header to the section 13 one) runs in
+ * node:vm with a fake window, document and storage. The handler itself is
+ * driven through the captured `tildaform:aftersuccess` listener. No
+ * dependencies: `npm test`.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -19,7 +22,8 @@ import vm from "node:vm";
 const source = readFileSync(new URL("../src/head.js", import.meta.url), "utf8");
 const lines = source.split("\n");
 const start = lines.findIndex((l) => l.startsWith("/* ===================== 12. Cart snapshot"));
-const block = lines.slice(start).join("\n");
+const end = lines.findIndex((l) => l.startsWith("/* ===================== 13. Payment result link"));
+const block = lines.slice(start, end).join("\n");
 
 const asked = [];
 
@@ -34,14 +38,49 @@ class FakeFormData {
   }
 }
 
-const load = () => {
-  const window = { console, location: { href: "https://robeauty.me/cart", search: "" } };
-  const document = { cookie: "", addEventListener: () => {} };
-  vm.runInNewContext(block, { window, document, localStorage: { getItem: () => null }, console, JSON, Math, Number, RegExp, String, isFinite, parseInt, decodeURIComponent, FormData: FakeFormData });
-  return window.__rbCartSnapshot;
+/* Deterministic but different on every call, so two tokens never collide. */
+let randomByte = 0;
+const countingCrypto = {
+  getRandomValues: (bytes) => {
+    for (let i = 0; i < bytes.length; i++) bytes[i] = randomByte++ % 256;
+    return bytes;
+  },
 };
 
-const api = load();
+const load = (opts = {}) => {
+  const store = Object.assign({}, opts.store);
+  const session = {};
+  const sent = [];
+  const localStorage = {
+    getItem: (k) => (k in store ? store[k] : null),
+    setItem: (k, v) => {
+      store[k] = String(v);
+    },
+  };
+  const sessionStorage = {
+    getItem: (k) => (k in session ? session[k] : null),
+    setItem: (k, v) => {
+      session[k] = String(v);
+    },
+  };
+  const handlers = {};
+  const window = {
+    console,
+    location: { href: "https://robeauty.me/cart", search: "" },
+    btoa: "btoa" in opts ? opts.btoa : globalThis.btoa,
+    crypto: "crypto" in opts ? opts.crypto : countingCrypto,
+    dataLayer: opts.dataLayer,
+  };
+  const document = { cookie: "", addEventListener: (name, fn) => { handlers[name] = fn; } };
+  const fetch = (url, init) => {
+    sent.push({ url, init });
+    return { catch: () => {} };
+  };
+  vm.runInNewContext(block, { window, document, localStorage, sessionStorage, fetch, console, JSON, Math, Number, RegExp, String, Date, Uint8Array, isFinite, parseInt, decodeURIComponent, FormData: FakeFormData });
+  return { api: window.__rbCartSnapshot, store, handlers, sent };
+};
+
+const api = load().api;
 // Objects built inside the vm have the vm's prototypes; compare plain copies.
 const plain = (x) => JSON.parse(JSON.stringify(x));
 
@@ -251,4 +290,92 @@ test("details: live values win, the submit snapshot fills the gaps", () => {
   });
   assert.deepEqual(plain(api.collectDetails({}, null)), {});
   assert.deepEqual(plain(api.collectDetails(null, null)), {});
+});
+
+/* ---------- the /payment-result token ---------- */
+
+const payRecord = (store) => JSON.parse(store.rb_pay_link);
+
+test("pay link: a new order gets a token and a record", () => {
+  const { api: a, store } = load();
+  const t = a.payLinkFor("1158838403", 1_700_000_000_000);
+  assert.match(t, /^[A-Za-z0-9_-]{22}$/); // 16 bytes, base64url, no padding
+  assert.deepEqual(payRecord(store), {
+    v: 1,
+    ref: "2095616_1158838403",
+    order: "1158838403",
+    t,
+    ts: 1_700_000_000_000,
+  });
+});
+
+test("pay link: the same order keeps its token", () => {
+  const now = 1_700_000_000_000;
+  const record = { v: 1, ref: "2095616_1158838403", order: "1158838403", t: "oldtoken", ts: now - 3600 * 1000 };
+  const { api: a, store } = load({ store: { rb_pay_link: JSON.stringify(record) } });
+  assert.equal(a.payLinkFor("1158838403", now), "oldtoken");
+  assert.deepEqual(payRecord(store), record); // untouched
+});
+
+test("pay link: an expired record or another order gives a new token", () => {
+  const now = 1_700_000_000_000;
+  const old = { v: 1, ref: "2095616_1158838403", order: "1158838403", t: "oldtoken", ts: now - 73 * 3600 * 1000 };
+
+  let r = load({ store: { rb_pay_link: JSON.stringify(old) } });
+  let t = r.api.payLinkFor("1158838403", now);
+  assert.notEqual(t, "oldtoken");
+  assert.equal(payRecord(r.store).ts, now);
+
+  const fresh = Object.assign({}, old, { ts: now - 1000 });
+  r = load({ store: { rb_pay_link: JSON.stringify(fresh) } });
+  t = r.api.payLinkFor("2222222222", now);
+  assert.notEqual(t, "oldtoken");
+  assert.equal(payRecord(r.store).ref, "2095616_2222222222");
+});
+
+test("pay link: no crypto means no token and no record", () => {
+  const { api: a, store } = load({ crypto: null });
+  assert.equal(a.payLinkFor("1158838403", 1_700_000_000_000), "");
+  assert.equal(store.rb_pay_link, undefined);
+});
+
+test("pay link: without btoa the token is hex", () => {
+  const { api: a } = load({ btoa: undefined });
+  assert.match(a.payLinkFor("1158838403", 1), /^[0-9a-f]{32}$/);
+});
+
+/* ---------- the request the handler actually sends ---------- */
+
+const cartForm = () => ({
+  id: "form665507684",
+  fields: { name: "Іван", paymentsystem: "wayforpay" },
+  closest: (sel) => (sel === ".t706__orderform" ? {} : null),
+  querySelector: (sel) => (sel === 'input[name="paymentsystem"]:checked' ? { value: "wayforpay" } : null),
+});
+
+test("the sent body carries the order number and the token", () => {
+  const dataLayer = [{ ecommerce: { purchase: { actionField: { id: "T202609-1158838403" } } } }];
+  const r = load({ dataLayer, store: { tcart: JSON.stringify({ amount: 1540, products: [] }) } });
+
+  r.handlers["tildaform:aftersuccess"]({ target: cartForm() });
+
+  assert.equal(r.sent.length, 1);
+  assert.equal(r.sent[0].url, "https://payment-handler.site/api/tilda-orders/cart-snapshot");
+  const body = JSON.parse(r.sent[0].init.body);
+  assert.equal(body.order_no, "1158838403");
+  assert.equal(body.t, payRecord(r.store).t);
+  assert.equal(body.amount, 1540);
+
+  // A second success for the same order sends nothing more.
+  r.handlers["tildaform:aftersuccess"]({ target: cartForm() });
+  assert.equal(r.sent.length, 1);
+});
+
+test("without a token the body simply has no `t`", () => {
+  const dataLayer = [{ transaction_id: "1158838403" }];
+  const r = load({ crypto: null, dataLayer });
+  r.handlers["tildaform:aftersuccess"]({ target: cartForm() });
+  const body = JSON.parse(r.sent[0].init.body);
+  assert.equal(body.order_no, "1158838403");
+  assert.equal("t" in body, false);
 });
