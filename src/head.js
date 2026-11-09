@@ -4237,8 +4237,14 @@ document.addEventListener("DOMContentLoaded", function () {
    delivery method and the total. The phone, the email and the `ma_*` fields
    are never read — the form is asked for named fields, never iterated.
 
-   This block only reads. It never touches the DOM, the form fields, `tcart`,
-   `dataLayer` or anybody else's localStorage, and it never cancels an event.
+   The one thing it writes is `localStorage.rb_pay_link`: the token of the
+   /payment-result link for this order, which also goes to the server as `t`.
+   A customer who comes back from a failed payment lands on /payment-result
+   with no parameters, and section 13 rebuilds the address from that record.
+
+   Apart from that key the block only reads. It never touches the DOM, the
+   form fields, `tcart`, `dataLayer` or anybody else's localStorage, and it
+   never cancels an event.
    The request is fire-and-forget with `keepalive`, so the cart and the
    redirect to payment behave exactly as before even when our server is down
    or blocked by an adblocker. Every failure is swallowed; `console.debug`
@@ -4255,6 +4261,10 @@ document.addEventListener("DOMContentLoaded", function () {
     // Only the main cart: the upsell cart on /thanks is a separate order.
     var MAIN_CART_FORM_ID = "form665507684";
     var SENT_PREFIX = "rb_cart_snapshot_sent:";
+    // The /payment-result token: section 13 reads it, the server gets it too.
+    var PAY_LINK_KEY = "rb_pay_link";
+    var PAY_LINK_TTL_MS = 72 * 60 * 60 * 1000;
+    var TILDA_PROJECT = "2095616";
     var MAX_PRODUCTS = 50;
     var MAX_TEXT = 200;
     // Browsers cap a `keepalive` body at 64 KB and drop the request silently.
@@ -4525,6 +4535,77 @@ document.addEventListener("DOMContentLoaded", function () {
       return body;
     }
 
+    function readPayLink() {
+      try {
+        return JSON.parse(localStorage.getItem(PAY_LINK_KEY) || "null");
+      } catch (e) {
+        return null;
+      }
+    }
+
+    function base64url(bytes) {
+      var chars = [];
+      for (var i = 0; i < bytes.length; i++) {
+        chars.push(String.fromCharCode(bytes[i]));
+      }
+      if (window.btoa) {
+        return window
+          .btoa(chars.join(""))
+          .replace(/\+/g, "-")
+          .replace(/\//g, "_")
+          .replace(/=+$/, "");
+      }
+      // Without btoa hex keeps the token usable, just longer.
+      var hex = "";
+      for (var j = 0; j < bytes.length; j++) {
+        hex += (bytes[j] < 16 ? "0" : "") + bytes[j].toString(16);
+      }
+      return hex;
+    }
+
+    function newToken() {
+      var cryptoApi = window.crypto;
+      if (!cryptoApi || !cryptoApi.getRandomValues) return "";
+      var bytes = new Uint8Array(16);
+      cryptoApi.getRandomValues(bytes);
+      return base64url(bytes);
+    }
+
+    /* The token of the /payment-result link for this order. The same order
+       keeps its token, so a repeated success or a reload does not invalidate a
+       link the customer may already have been given. Returns "" when there is
+       no crypto or no storage — then nothing is written and no `t` is sent. */
+    function payLinkFor(orderNo, now) {
+      try {
+        var stored = readPayLink();
+        if (
+          stored &&
+          stored.v === 1 &&
+          stored.order === orderNo &&
+          stored.t &&
+          typeof stored.ts === "number" &&
+          now - stored.ts <= PAY_LINK_TTL_MS
+        ) {
+          return stored.t;
+        }
+        var token = newToken();
+        if (!token) return "";
+        localStorage.setItem(
+          PAY_LINK_KEY,
+          JSON.stringify({
+            v: 1,
+            ref: TILDA_PROJECT + "_" + orderNo,
+            order: orderNo,
+            t: token,
+            ts: now,
+          }),
+        );
+        return token;
+      } catch (e) {
+        return "";
+      }
+    }
+
     /* Same rule as section 9: an empty value or `cash` is not an online
        payment, and only an online payment can stay unpaid. */
     function paysOnline(form) {
@@ -4578,8 +4659,10 @@ document.addEventListener("DOMContentLoaded", function () {
           sessionStorage.setItem(sentKey, "1");
         } catch (err) {}
 
+        var payToken = payLinkFor(orderNo, Date.now());
         var cart = readCart();
         var payload = { order_no: orderNo };
+        if (payToken) payload.t = payToken;
         var amount = Number(cart && cart.amount);
         if (isFinite(amount) && amount > 0) payload.amount = amount;
         payload.products = collectProducts(cart);
@@ -4628,7 +4711,123 @@ document.addEventListener("DOMContentLoaded", function () {
       readFormFields: readFormFields,
       readCartFields: readCartFields,
       collectDetails: collectDetails,
+      payLinkFor: payLinkFor,
       buildBody: buildBody,
     };
+  } catch (e) {}
+})();
+
+/* ===================== 13. Payment result link ===================== */
+/* The /payment-result page takes the order it should ask about from the
+   address only — `?ref=…` (or `?order=…`) plus `?t=…` — and does nothing
+   without it. A customer who comes back from a failed WayForPay payment lands
+   there with no parameters at all and sees an empty page. This block puts the
+   parameters back from the record section 12 wrote when the order was
+   submitted (`localStorage.rb_pay_link`).
+
+   It runs while this file is being loaded, not on DOMContentLoaded: the bundle
+   is a plain synchronous <script> in the <head>, so the address is already
+   complete by the time the page blocks start and read it.
+
+   It stays out of the way. An address that already carries `ref` or `order` is
+   left exactly as it is — the links from Viber and SMS, and the demo links,
+   must keep working — and `history.replaceState` keeps the history entry and
+   its state, so Back behaves as before. Nothing else on the page is touched
+   and the record is left in place, so a reload works the same; it ages out on
+   its own after 72 hours. Every failure is swallowed; `console.debug` output
+   only appears with `window.RB_PAY_LINK_DEBUG = true`.
+
+   Rollback: repin the bundle to @robeauty-v1.0.30. */
+(function () {
+  try {
+    var PAGE_PATH = "/payment-result";
+    var PAY_LINK_KEY = "rb_pay_link";
+    var PAY_LINK_TTL_MS = 72 * 60 * 60 * 1000;
+
+    function debug(msg, data) {
+      if (window.RB_PAY_LINK_DEBUG !== true) return;
+      if (window.console && console.debug) {
+        console.debug("[rb-pay-link]", msg, data);
+      }
+    }
+
+    // `/payment-result/` and `/payment-result` are the same page.
+    function samePage(pathname) {
+      var path = String(pathname || "");
+      if (path.length > 1) path = path.replace(/\/+$/, "");
+      return path === PAGE_PATH;
+    }
+
+    function parseRecord(raw) {
+      var record;
+      try {
+        record = JSON.parse(raw || "null");
+      } catch (e) {
+        return null;
+      }
+      if (!record || record.v !== 1) return null;
+      if (!record.ref || !record.t) return null;
+      if (typeof record.ts !== "number") return null;
+      return record;
+    }
+
+    // A record from the future is as useless as an expired one.
+    function isFresh(record, now) {
+      if (!record) return false;
+      var age = now - record.ts;
+      return age >= 0 && age <= PAY_LINK_TTL_MS;
+    }
+
+    function hasOrderParam(search) {
+      return /[?&](ref|order)=/.test(String(search || ""));
+    }
+
+    /* `ref` and `t` first, then whatever the page already carried. */
+    function buildUrl(pathname, search, hash, record) {
+      var query =
+        "?ref=" +
+        encodeURIComponent(record.ref) +
+        "&t=" +
+        encodeURIComponent(record.t);
+      var rest = String(search || "").replace(/^\?/, "");
+      if (rest) query += "&" + rest;
+      return String(pathname || "") + query + String(hash || "");
+    }
+
+    function readRaw() {
+      try {
+        return localStorage.getItem(PAY_LINK_KEY);
+      } catch (e) {
+        return null;
+      }
+    }
+
+    // The pure parts, so `npm test` can check them without a browser.
+    window.__rbPayLink = {
+      samePage: samePage,
+      parseRecord: parseRecord,
+      isFresh: isFresh,
+      hasOrderParam: hasOrderParam,
+      buildUrl: buildUrl,
+    };
+
+    var loc = window.location;
+    var hist = window.history;
+    if (!loc || !hist || !hist.replaceState) return;
+    if (!samePage(loc.pathname)) return;
+    if (hasOrderParam(loc.search)) {
+      debug("address already carries the order");
+      return;
+    }
+
+    var record = parseRecord(readRaw());
+    if (!isFresh(record, Date.now())) {
+      debug("no usable record", record);
+      return;
+    }
+
+    var url = buildUrl(loc.pathname, loc.search, loc.hash, record);
+    hist.replaceState(hist.state, "", url);
+    debug("address restored", url);
   } catch (e) {}
 })();
