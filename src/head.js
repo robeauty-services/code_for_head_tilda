@@ -4267,6 +4267,8 @@ document.addEventListener("DOMContentLoaded", function () {
     var TILDA_PROJECT = "2095616";
     var MAX_PRODUCTS = 50;
     var MAX_TEXT = 200;
+    // A Tilda image URL carries resize/format steps, so it outgrows a field.
+    var MAX_IMG = 500;
     // Browsers cap a `keepalive` body at 64 KB and drop the request silently.
     var MAX_BODY = 60 * 1024;
     var UTM_KEYS = [
@@ -4397,12 +4399,73 @@ document.addEventListener("DOMContentLoaded", function () {
       return utm;
     }
 
+    function skuFromName(text) {
+      var match = String(text || "").match(/\[sku:\s*([^\]]+)\]/i);
+      return match && match[1] ? cut(match[1]) : "";
+    }
+
     /* SKU of a line: `[sku:…]` in the name, which is how the order buttons put
        it there, otherwise Tilda's own fields. Same source as section 5. */
     function skuOf(product) {
-      var match = String(product.name || "").match(/\[sku:\s*([^\]]+)\]/i);
-      if (match && match[1]) return cut(match[1]);
-      return cut(product.sku || product.uid || "");
+      return skuFromName(product.name) || cut(product.sku || product.uid || "");
+    }
+
+    // Only https: the page shows the photo, and a http one would be blocked.
+    function httpsUrl(value) {
+      var url = String(value == null ? "" : value).trim();
+      if (!/^https:\/\//i.test(url)) return "";
+      return url.slice(0, MAX_IMG);
+    }
+
+    function bgImageUrl(style) {
+      var match = String(style || "").match(
+        /background-image\s*:\s*url\s*\(\s*['"]?([^'")]+)/i,
+      );
+      if (!match || !match[1]) return "";
+      return match[1].replace(/^['"]|['"]$/g, "").trim();
+    }
+
+    /* The rows of the open cart window in their own order, as [{sku, img}].
+       Tilda draws those rows from the same `tcart.products[].img`, so this is
+       a fallback for the case the stored cart lost the field — the one
+       section 5 hits when Tilda clears `tcart` around the callback. */
+    function cartDomRows() {
+      var rows = [];
+      try {
+        var box = document.querySelector(".t706__cartwin-products");
+        if (!box) return rows;
+        var nodes = box.querySelectorAll(".t706__product");
+        for (var i = 0; i < nodes.length; i++) {
+          var titleEl = nodes[i].querySelector(".t706__product-title");
+          var imgEl = nodes[i].querySelector(".t706__product-imgdiv");
+          var img = "";
+          if (imgEl) {
+            img = bgImageUrl(imgEl.getAttribute("style"));
+            if (!img) img = (imgEl.getAttribute("data-original") || "").trim();
+          }
+          rows.push({
+            sku: skuFromName(titleEl ? titleEl.textContent : ""),
+            img: img,
+          });
+        }
+      } catch (e) {}
+      return rows;
+    }
+
+    /* The line's own photo, else the open cart's row — matched by SKU, and by
+       position when the line carries none. */
+    function imgFor(product, domRows, index) {
+      var own = httpsUrl(product.img);
+      if (own) return own;
+      if (!domRows.length) return "";
+      var sku = skuFromName(product.name);
+      if (sku) {
+        for (var i = 0; i < domRows.length; i++) {
+          if (domRows[i].sku === sku) return httpsUrl(domRows[i].img);
+        }
+      }
+      var row = domRows[index];
+      return row ? httpsUrl(row.img) : "";
     }
 
     function toNumber(value) {
@@ -4414,16 +4477,21 @@ document.addEventListener("DOMContentLoaded", function () {
       var items = [];
       if (!cart || !cart.products || !cart.products.length) return items;
       var products = cart.products;
+      var domRows = cartDomRows();
       for (var i = 0; i < products.length; i++) {
         if (items.length >= MAX_PRODUCTS) break;
         var product = products[i] || {};
-        items.push({
+        var item = {
           name: cut(product.name),
           sku: skuOf(product),
           quantity: parseInt(product.quantity, 10) || 1,
           price: toNumber(product.price),
           url: cut(product.url),
-        });
+        };
+        // No photo found: the field is left out, not sent empty.
+        var img = imgFor(product, domRows, i);
+        if (img) item.img = img;
+        items.push(item);
       }
       return items;
     }
