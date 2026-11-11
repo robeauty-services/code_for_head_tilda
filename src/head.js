@@ -4425,10 +4425,15 @@ document.addEventListener("DOMContentLoaded", function () {
       return match[1].replace(/^['"]|['"]$/g, "").trim();
     }
 
-    /* The rows of the open cart window in their own order, as [{sku, img}].
-       Tilda draws those rows from the same `tcart.products[].img`, so this is
-       a fallback for the case the stored cart lost the field — the one
-       section 5 hits when Tilda clears `tcart` around the callback. */
+    /* The rows of the open cart window, as [{sku, img, idx}]. Tilda draws
+       them from the same `tcart.products[].img`, so this is the fallback for
+       a stored cart without the field — and on this site it is the main
+       source, because `localStorage.tcart` comes back with no products.
+
+       `idx` is Tilda's own `data-cart-product-i`, the line's index in
+       `tcart.products`. Page scripts add rows of their own to this list
+       (gifts, sets), so the position in the DOM is not the position in the
+       cart; the attribute is. */
     function cartDomRows() {
       var rows = [];
       try {
@@ -4443,26 +4448,32 @@ document.addEventListener("DOMContentLoaded", function () {
             img = bgImageUrl(imgEl.getAttribute("style"));
             if (!img) img = (imgEl.getAttribute("data-original") || "").trim();
           }
+          var idx = parseInt(nodes[i].getAttribute("data-cart-product-i"), 10);
           rows.push({
             sku: skuFromName(titleEl ? titleEl.textContent : ""),
             img: img,
+            idx: isNaN(idx) ? -1 : idx,
           });
         }
       } catch (e) {}
       return rows;
     }
 
-    /* The line's own photo, else the open cart's row — matched by SKU, and by
-       position when the line carries none. */
+    /* The line's own photo, else the open cart's row: by SKU, then by Tilda's
+       index, and only then by position. */
     function imgFor(product, domRows, index) {
       var own = httpsUrl(product.img);
       if (own) return own;
       if (!domRows.length) return "";
       var sku = skuFromName(product.name);
+      var i;
       if (sku) {
-        for (var i = 0; i < domRows.length; i++) {
+        for (i = 0; i < domRows.length; i++) {
           if (domRows[i].sku === sku) return httpsUrl(domRows[i].img);
         }
+      }
+      for (i = 0; i < domRows.length; i++) {
+        if (domRows[i].idx === index) return httpsUrl(domRows[i].img);
       }
       var row = domRows[index];
       return row ? httpsUrl(row.img) : "";

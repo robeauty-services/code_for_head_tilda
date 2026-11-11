@@ -73,7 +73,9 @@ const load = (opts = {}) => {
     crypto: "crypto" in opts ? opts.crypto : countingCrypto,
     dataLayer: opts.dataLayer,
   };
-  const rows = (opts.cartRows ?? []).map((row) => ({
+  const rows = (opts.cartRows ?? []).map((row, i) => ({
+    getAttribute: (name) =>
+      name === "data-cart-product-i" ? String(row.idx ?? i) : null,
     querySelector: (sel) => {
       if (sel === ".t706__product-title") return { textContent: row.title ?? "" };
       if (sel !== ".t706__product-imgdiv") return null;
@@ -470,4 +472,21 @@ test("photo: the line's own address wins over the cart window", () => {
 test("photo: no cart window and no photo means no field", () => {
   const items = imgOf({ products: [{ name: "Крем", quantity: 1, price: 1 }] });
   assert.equal("img" in items[0], false);
+});
+
+test("photo: the cart row is found by Tilda's index, not by DOM order", () => {
+  // The page adds rows of its own (a gift, a set), so the third DOM row is
+  // the second line of the cart.
+  const cartRows = [
+    { title: "Крем", img: "https://static.tildacdn.com/krem.jpg", idx: 0 },
+    { title: "Подарунок", img: "https://static.tildacdn.com/gift.jpg", idx: -1 },
+    { title: "Сироватка", img: "https://static.tildacdn.com/serum.jpg", idx: 1 },
+  ];
+  const products = [
+    { name: "Крем", quantity: 1, price: 490 },
+    { name: "Сироватка", quantity: 1, price: 890 },
+  ];
+  const items = imgOf({ products }, cartRows);
+  assert.equal(items[0].img, "https://static.tildacdn.com/krem.jpg");
+  assert.equal(items[1].img, "https://static.tildacdn.com/serum.jpg");
 });
