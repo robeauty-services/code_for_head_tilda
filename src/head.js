@@ -4267,6 +4267,8 @@ document.addEventListener("DOMContentLoaded", function () {
     var TILDA_PROJECT = "2095616";
     var MAX_PRODUCTS = 50;
     var MAX_TEXT = 200;
+    // A Tilda image URL carries resize/format steps, so it outgrows a field.
+    var MAX_IMG = 500;
     // Browsers cap a `keepalive` body at 64 KB and drop the request silently.
     var MAX_BODY = 60 * 1024;
     var UTM_KEYS = [
@@ -4397,12 +4399,84 @@ document.addEventListener("DOMContentLoaded", function () {
       return utm;
     }
 
+    function skuFromName(text) {
+      var match = String(text || "").match(/\[sku:\s*([^\]]+)\]/i);
+      return match && match[1] ? cut(match[1]) : "";
+    }
+
     /* SKU of a line: `[sku:…]` in the name, which is how the order buttons put
        it there, otherwise Tilda's own fields. Same source as section 5. */
     function skuOf(product) {
-      var match = String(product.name || "").match(/\[sku:\s*([^\]]+)\]/i);
-      if (match && match[1]) return cut(match[1]);
-      return cut(product.sku || product.uid || "");
+      return skuFromName(product.name) || cut(product.sku || product.uid || "");
+    }
+
+    // Only https: the page shows the photo, and a http one would be blocked.
+    function httpsUrl(value) {
+      var url = String(value == null ? "" : value).trim();
+      if (!/^https:\/\//i.test(url)) return "";
+      return url.slice(0, MAX_IMG);
+    }
+
+    function bgImageUrl(style) {
+      var match = String(style || "").match(
+        /background-image\s*:\s*url\s*\(\s*['"]?([^'")]+)/i,
+      );
+      if (!match || !match[1]) return "";
+      return match[1].replace(/^['"]|['"]$/g, "").trim();
+    }
+
+    /* The rows of the open cart window, as [{sku, img, idx}]. Tilda draws
+       them from the same `tcart.products[].img`, so this is the fallback for
+       a stored cart without the field — and on this site it is the main
+       source, because `localStorage.tcart` comes back with no products.
+
+       `idx` is Tilda's own `data-cart-product-i`, the line's index in
+       `tcart.products`. Page scripts add rows of their own to this list
+       (gifts, sets), so the position in the DOM is not the position in the
+       cart; the attribute is. */
+    function cartDomRows() {
+      var rows = [];
+      try {
+        var box = document.querySelector(".t706__cartwin-products");
+        if (!box) return rows;
+        var nodes = box.querySelectorAll(".t706__product");
+        for (var i = 0; i < nodes.length; i++) {
+          var titleEl = nodes[i].querySelector(".t706__product-title");
+          var imgEl = nodes[i].querySelector(".t706__product-imgdiv");
+          var img = "";
+          if (imgEl) {
+            img = bgImageUrl(imgEl.getAttribute("style"));
+            if (!img) img = (imgEl.getAttribute("data-original") || "").trim();
+          }
+          var idx = parseInt(nodes[i].getAttribute("data-cart-product-i"), 10);
+          rows.push({
+            sku: skuFromName(titleEl ? titleEl.textContent : ""),
+            img: img,
+            idx: isNaN(idx) ? -1 : idx,
+          });
+        }
+      } catch (e) {}
+      return rows;
+    }
+
+    /* The line's own photo, else the open cart's row: by SKU, then by Tilda's
+       index, and only then by position. */
+    function imgFor(product, domRows, index) {
+      var own = httpsUrl(product.img);
+      if (own) return own;
+      if (!domRows.length) return "";
+      var sku = skuFromName(product.name);
+      var i;
+      if (sku) {
+        for (i = 0; i < domRows.length; i++) {
+          if (domRows[i].sku === sku) return httpsUrl(domRows[i].img);
+        }
+      }
+      for (i = 0; i < domRows.length; i++) {
+        if (domRows[i].idx === index) return httpsUrl(domRows[i].img);
+      }
+      var row = domRows[index];
+      return row ? httpsUrl(row.img) : "";
     }
 
     function toNumber(value) {
@@ -4414,16 +4488,21 @@ document.addEventListener("DOMContentLoaded", function () {
       var items = [];
       if (!cart || !cart.products || !cart.products.length) return items;
       var products = cart.products;
+      var domRows = cartDomRows();
       for (var i = 0; i < products.length; i++) {
         if (items.length >= MAX_PRODUCTS) break;
         var product = products[i] || {};
-        items.push({
+        var item = {
           name: cut(product.name),
           sku: skuOf(product),
           quantity: parseInt(product.quantity, 10) || 1,
           price: toNumber(product.price),
           url: cut(product.url),
-        });
+        };
+        // No photo found: the field is left out, not sent empty.
+        var img = imgFor(product, domRows, i);
+        if (img) item.img = img;
+        items.push(item);
       }
       return items;
     }

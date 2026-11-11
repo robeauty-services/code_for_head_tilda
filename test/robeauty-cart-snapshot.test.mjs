@@ -5,6 +5,8 @@
  *   bareOrderId / orderIdFromDataLayer -> the order number Tilda announced
  *   parseTildaUtm / collectUtm         -> UTM tags from the TILDAUTM cookie
  *   collectProducts / buildBody        -> the cart lines and the request body
+ *                                         (the photo comes from the cart or
+ *                                          from the open cart window)
  *   readFormFields / readCartFields    -> the whitelist that makes up `details`
  *   collectDetails                     -> live values first, submit snapshot second
  *   payLinkFor                         -> the /payment-result token for this order
@@ -71,7 +73,28 @@ const load = (opts = {}) => {
     crypto: "crypto" in opts ? opts.crypto : countingCrypto,
     dataLayer: opts.dataLayer,
   };
-  const document = { cookie: "", addEventListener: (name, fn) => { handlers[name] = fn; } };
+  const rows = (opts.cartRows ?? []).map((row, i) => ({
+    getAttribute: (name) =>
+      name === "data-cart-product-i" ? String(row.idx ?? i) : null,
+    querySelector: (sel) => {
+      if (sel === ".t706__product-title") return { textContent: row.title ?? "" };
+      if (sel !== ".t706__product-imgdiv") return null;
+      if (!("img" in row) && !("dataOriginal" in row)) return null;
+      return {
+        getAttribute: (name) => {
+          if (name === "style") return row.img ? "background-image:url('" + row.img + "');" : "";
+          if (name === "data-original") return row.dataOriginal ?? "";
+          return null;
+        },
+      };
+    },
+  }));
+  const document = {
+    cookie: "",
+    addEventListener: (name, fn) => { handlers[name] = fn; },
+    querySelector: (sel) =>
+      sel === ".t706__cartwin-products" && opts.cartRows ? { querySelectorAll: () => rows } : null,
+  };
   const fetch = (url, init) => {
     sent.push({ url, init });
     return { catch: () => {} };
@@ -378,4 +401,92 @@ test("without a token the body simply has no `t`", () => {
   const body = JSON.parse(r.sent[0].init.body);
   assert.equal(body.order_no, "1158838403");
   assert.equal("t" in body, false);
+});
+
+/* ---------- the product photo ---------- */
+
+const imgOf = (cart, cartRows) => plain(load({ cartRows }).api.collectProducts(cart));
+
+test("photo: taken from the cart line itself", () => {
+  const img = "https://optim.tildacdn.net/tild3637-3530/-/resize/320x/-/format/webp/serum.jpg.webp";
+  const items = imgOf({ products: [{ name: "Сироватка", quantity: 1, price: 890, img }] });
+  assert.equal(items[0].img, img);
+});
+
+test("photo: anything but https is left out", () => {
+  const products = [
+    { name: "A", quantity: 1, price: 1, img: "http://optim.tildacdn.net/a.jpg" },
+    { name: "B", quantity: 1, price: 1, img: "//optim.tildacdn.net/b.jpg" },
+    { name: "C", quantity: 1, price: 1, img: "" },
+    { name: "D", quantity: 1, price: 1 },
+  ];
+  for (const item of imgOf({ products })) assert.equal("img" in item, false);
+});
+
+test("photo: a long address is cut to 500 characters", () => {
+  const img = "https://optim.tildacdn.net/" + "x".repeat(600) + ".jpg";
+  const items = imgOf({ products: [{ name: "A", quantity: 1, price: 1, img }] });
+  assert.equal(items[0].img.length, 500);
+  assert.equal(items[0].img, img.slice(0, 500));
+});
+
+test("photo: from the open cart window, matched by SKU", () => {
+  // The cart rows are in another order than the stored cart.
+  const cartRows = [
+    { title: "Крем [sku:00-00001111]", img: "https://static.tildacdn.net/krem.jpg" },
+    { title: "Сироватка [sku:00-00003666]", img: "https://static.tildacdn.net/serum.jpg" },
+  ];
+  const products = [
+    { name: "Сироватка [sku:00-00003666]", quantity: 1, price: 890 },
+    { name: "Крем [sku:00-00001111]", quantity: 1, price: 650 },
+  ];
+  const items = imgOf({ products }, cartRows);
+  assert.equal(items[0].img, "https://static.tildacdn.net/serum.jpg");
+  assert.equal(items[1].img, "https://static.tildacdn.net/krem.jpg");
+});
+
+test("photo: without a SKU the cart window is read by position", () => {
+  const cartRows = [
+    { title: "Набір", img: "https://static.tildacdn.one/set.jpg" },
+    { title: "Крем", dataOriginal: "https://static.tildacdn.one/krem.jpg" },
+  ];
+  const products = [
+    { name: "Набір", quantity: 1, price: 1200 },
+    { name: "Крем", quantity: 1, price: 650 },
+  ];
+  const items = imgOf({ products }, cartRows);
+  assert.equal(items[0].img, "https://static.tildacdn.one/set.jpg");
+  // The lazyload attribute is read when the row has no background image yet.
+  assert.equal(items[1].img, "https://static.tildacdn.one/krem.jpg");
+});
+
+test("photo: the line's own address wins over the cart window", () => {
+  const cartRows = [{ title: "Крем", img: "https://static.tildacdn.net/dom.jpg" }];
+  const items = imgOf(
+    { products: [{ name: "Крем", quantity: 1, price: 1, img: "https://static.tildacdn.net/own.jpg" }] },
+    cartRows,
+  );
+  assert.equal(items[0].img, "https://static.tildacdn.net/own.jpg");
+});
+
+test("photo: no cart window and no photo means no field", () => {
+  const items = imgOf({ products: [{ name: "Крем", quantity: 1, price: 1 }] });
+  assert.equal("img" in items[0], false);
+});
+
+test("photo: the cart row is found by Tilda's index, not by DOM order", () => {
+  // The page adds rows of its own (a gift, a set), so the third DOM row is
+  // the second line of the cart.
+  const cartRows = [
+    { title: "Крем", img: "https://static.tildacdn.com/krem.jpg", idx: 0 },
+    { title: "Подарунок", img: "https://static.tildacdn.com/gift.jpg", idx: -1 },
+    { title: "Сироватка", img: "https://static.tildacdn.com/serum.jpg", idx: 1 },
+  ];
+  const products = [
+    { name: "Крем", quantity: 1, price: 490 },
+    { name: "Сироватка", quantity: 1, price: 890 },
+  ];
+  const items = imgOf({ products }, cartRows);
+  assert.equal(items[0].img, "https://static.tildacdn.com/krem.jpg");
+  assert.equal(items[1].img, "https://static.tildacdn.com/serum.jpg");
 });
