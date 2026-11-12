@@ -2974,9 +2974,19 @@ document.addEventListener("DOMContentLoaded", function () {
     var hold = null;
     var timer = null;
     var resendLeft = 0;
-    /* Сервер тримає резерв 45 хвилин; тут на хвилину менше, щоб кошик
-       ніколи не показував знижку за резервом, якого вже немає. */
+    /* Скільки кошик показує знижку після підтвердження коду. Сервер з
+       19.10.2026 тримає резерв 48 годин (kommo-service, holdTtlMs) — щоб
+       пізня оплата карткою ще знайшла його, — а кошик навмисно забуває свою
+       копію за 44 хвилини, щоб ніхто не бачив знижку за резервом, який тим
+       часом могли замінити чи використати. */
     var HOLD_MS = 44 * 60 * 1000;
+    /* Наш показовий код у слоті промокоду. Строгий шаблон, а не /^BONUS-/:
+       справжній промокод Тільди не мусить потрапити під зачистку. */
+    var BONUS_CODE_RE = /^BONUS-[0-9A-Z]{12}$/i;
+    function isBonusCode(code) {
+      return BONUS_CODE_RE.test(String(code == null ? "" : code).trim());
+    }
+    var EXPIRED_NOTE = "Час резерву минув — підтвердьте номер ще раз.";
     /* Сума кошика нижче 1500 ₴ (або половина замало) — бонуси не діють, але
        резерв не знімаємо: покупець міг прибрати товар на мить. */
     var suspended = false;
@@ -2996,7 +3006,7 @@ document.addEventListener("DOMContentLoaded", function () {
         var v = JSON.parse(raw);
         // Резерви з 1.0.10 і раніше мали код BONUS-<id>, а до 1.0.14 — не
         // мали строку дії; такі просто забуваємо.
-        if (!(v && v.id && v.amount > 0 && /^BONUS-[0-9A-Z]{12}$/.test(v.code))) return null;
+        if (!(v && v.id && v.amount > 0 && isBonusCode(v.code))) return null;
         if (!v.expiresAt || v.expiresAt < Date.now()) return null;
         // Замовлення з цим резервом уже пішло, і Тільда очистила кошик —
         // резерв належить замовленню, у новому кошику його не показуємо.
@@ -3237,16 +3247,92 @@ document.addEventListener("DOMContentLoaded", function () {
       return planFor(products, hold.amount).applied;
     }
 
-    function dropDisplayedDiscount() {
+    function clearSlot() {
+      try {
+        delete window.tcart.promocode;
+      } catch (e) {
+        window.tcart.promocode = undefined;
+      }
+    }
+    /* Калькулятор знижок Тільди (`window.cartCalculator`, кошик 1.1) при
+       активній знижці магазину й правилі «не сумувати з промокодом» ховає наш
+       код у `appliedPromocode`, а коли знижка магазину стає меншою, сам
+       повертає його в слот. Тож код треба знімати і звідти — так само робить
+       скрипт промо-посилань сторінки. Сьогодні знижок магазину немає, але їх
+       можуть увімкнути на розпродаж. */
+    function forgetParked(test) {
+      var cc = window.cartCalculator;
+      var ap = cc && cc.appliedPromocode;
+      if (!ap || !test(ap.promocode)) return false;
+      cc.appliedPromocode = null;
+      return true;
+    }
+    function slotHasBonus() {
       var pc = window.tcart && window.tcart.promocode;
-      if (pc && hold && pc.promocode === hold.code) {
-        try {
-          delete window.tcart.promocode;
-        } catch (e) {
-          window.tcart.promocode = undefined;
-        }
+      return !!(pc && isBonusCode(pc.promocode));
+    }
+
+    function dropDisplayedDiscount() {
+      if (!hold) return;
+      var code = hold.code;
+      forgetParked(function (c) {
+        return c === code;
+      });
+      var pc = window.tcart && window.tcart.promocode;
+      if (pc && pc.promocode === code) {
+        clearSlot();
         redrawCart();
       }
+    }
+
+    /* Резерв живий: є, і кошиковий строк ще не минув. */
+    function liveHold() {
+      return !!hold && !!hold.expiresAt && hold.expiresAt >= Date.now();
+    }
+
+    /* Наш код у слоті без живого резерву. Так буває, коли резерв минув, поки
+       кошик був відкритий (раніше сторож обнуляв hold до того, як знімати
+       код, і код лишався), або hold зник іншим шляхом. Тільда шле такий код
+       на свій сервер, той відповідає «Promocode not found», і замовлення не
+       проходить (7–8.11.2026, дві клієнтки). Знімаємо код і перемальовуємо:
+       покупець бачить справжню суму. Повертає true, якщо щось зняли.
+         quiet — лише перерахувати й зберегти кошик, без перемальовування
+                 (у момент оформлення);
+         any   — зняти й код живого резерву (бонуси в це замовлення не йдуть). */
+    function dropDeadBonusCode(quiet, any) {
+      var keep = !any && liveHold() ? hold.code : null;
+      var dead = function (c) {
+        return isBonusCode(c) && c !== keep;
+      };
+      forgetParked(dead);
+      var pc = window.tcart && window.tcart.promocode;
+      if (!pc || !dead(pc.promocode)) return false;
+      clearSlot();
+      if (quiet) {
+        call("tcart__updateTotalProductsinCartObj");
+        call("tcart__saveLocalObj");
+      } else {
+        redrawCart();
+      }
+      return true;
+    }
+
+    /* Кошиковий строк резерву минув: знімаємо знижку (поки hold ще стоїть —
+       dropDisplayedDiscount звіряє код саме з ним), потім забуваємо резерв.
+       На сервері не скасовуємо: новий підтверджений код однаково його замінить.
+       Повертає true, якщо знижка була в кошику. */
+    function expireHold(isErr) {
+      var shown = slotHasBonus();
+      dropDisplayedDiscount();
+      hold = null;
+      lsSave(null);
+      view = "idle";
+      suspended = false;
+      if (dropDeadBonusCode()) shown = true;
+      var f = inCart("form");
+      if (f) setHiddenFields(f, null);
+      setNote(EXPIRED_NOTE, !!isErr);
+      return shown;
     }
 
     /* Показує знижку в кошику через `tcart.promocode` — тільки для показу:
@@ -3372,13 +3458,46 @@ document.addEventListener("DOMContentLoaded", function () {
            (резерв новішого коду або сповіщення менеджерам). */
     var passThroughUntil = 0;
     var checking = false;
+    function stopEvent(e) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      e.stopPropagation();
+    }
+    function showBlock() {
+      var el = inCart(".rb-redeem");
+      if (el && el.scrollIntoView) el.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
     function interceptCheckout(e) {
-      if (!hold || suspended) return;
       if (Date.now() < passThroughUntil) return;
       var t = e.target;
       var form = t && t.closest ? t.closest(".t706__orderform form") : null;
       if (!form) return;
       if (e.type === "click" && !(t.closest && t.closest(".t-submit"))) return;
+
+      /* Живого резерву немає, а знижка ще в кошику: сторож не встиг (вкладка
+         у фоні пригальмовує таймери, а сервер, що тримає резерв 48 годин,
+         на /status відповів би «живий»). Не оформлюємо зі знижкою, за яку
+         ніхто не спише бонуси: знімаємо її і кажемо чому. Наступний клік
+         проходить зі справжньою сумою, або покупець підтверджує код ще раз.
+         Зупиняємо, лише якщо код справді зійшов зі слоту: якби Тільда
+         повернула його назад, кожен клік блокувався б і покупець не міг би
+         оформити зовсім. Тоді клік іде далі, а код знімає обгортка оплати. */
+      if (hold && !liveHold()) {
+        if (expireHold(true) && !slotHasBonus()) {
+          stopEvent(e);
+          render();
+          showBlock();
+          return;
+        }
+        render();
+      } else if (!hold && dropDeadBonusCode() && !slotHasBonus()) {
+        stopEvent(e);
+        setNote(EXPIRED_NOTE, true);
+        render();
+        showBlock();
+        return;
+      }
+      if (!hold || suspended) return;
 
       e.preventDefault();
       e.stopImmediatePropagation();
@@ -3394,8 +3513,19 @@ document.addEventListener("DOMContentLoaded", function () {
         if (btn) btn.style.opacity = "";
         if (usable === false) {
           if (hold === h) dropStaleHold();
-          var el = inCart(".rb-redeem");
-          if (el && el.scrollIntoView) el.scrollIntoView({ block: "center", behavior: "smooth" });
+          showBlock();
+          return;
+        }
+        /* Поки чекали на сервер (до 4 с), минув кошиковий строк резерву, з
+           яким покупець натиснув «Оформити». Не повторюємо клік: знижку, яку
+           він бачив, уже знято (тут або сторожем), і замовлення пішло б за
+           повною ціною без жодного слова. Дивимось на сам h: сторож міг
+           устигнути обнулити hold раніше за нас. */
+        if (!(h.expiresAt >= Date.now())) {
+          if (hold === h) expireHold(true);
+          else setNote(EXPIRED_NOTE, true);
+          render();
+          showBlock();
           return;
         }
         // Живий (або не вдалося перевірити): пропускаємо саме цей повтор.
@@ -3429,6 +3559,39 @@ document.addEventListener("DOMContentLoaded", function () {
       }
     }
 
+    /* Чи піде в це замовлення бонусна знижка: живий резерв, не пауза, і є
+       на що її покласти. Ті самі умови, що в applyToPayment нижче. */
+    function willApply(tp) {
+      if (!liveHold() || suspended || !tp || !tp.products || !tp.products.length) return false;
+      return planFor(tp.products, hold.amount).applied > 0;
+    }
+
+    /* Остання страховка: бонусів у цьому замовленні не буде, а в копії кошика
+       для сервера Тільди лишився наш код. Тільда переносить у tildapayment
+       `tcart.promocode.promocode` і суму вже зі знижкою (`tcart.amount`);
+       незнайомий код її сервер відхиляє — «Promocode not found», — і покупець
+       застрягає на оформленні. Знімаємо код і знижку і повертаємо суму до
+       оплати до повної: без цього Тільда відхилила б замовлення через суму
+       або пропустила б знижку, за яку ніхто не спише бонуси. Зазвичай сюди не
+       доходить: interceptCheckout зупиняє такий клік ще до Тільди, а обгортка
+       оплати (wrapPayment) перебудовує tildapayment уже без коду. */
+    function stripDeadBonusCode(tp) {
+      if (!tp || !isBonusCode(tp.promocode)) return false;
+      var disc = num(tp.discount);
+      if (!(disc > 0) && tp.prodamount_withdiscount != null) {
+        disc = Math.max(0, round2(num(tp.prodamount) - num(tp.prodamount_withdiscount)));
+      }
+      if (disc > 0) tp.amount = round2(num(tp.amount) + disc);
+      else if (num(tp.amount_withoutdiscount) > num(tp.amount)) tp.amount = round2(num(tp.amount_withoutdiscount));
+      delete tp.promocode;
+      delete tp.discount;
+      delete tp.prodamount_withdiscount;
+      delete tp.amount_withoutdiscount;
+      // Сума покупки для аналітики (dataLayer purchase) — та, що пішла.
+      if (window.tildaForm) window.tildaForm.amountForStat = tp.amount;
+      return true;
+    }
+
     /* Викликається одразу після того, як Тільда зібрала
        `tildaForm.tildapayment` — копію кошика, яку вона серіалізує й шле на
        свій сервер. Міняємо саме цю копію, а не `tcart`: кошик, скрипт наборів
@@ -3440,15 +3603,21 @@ document.addEventListener("DOMContentLoaded", function () {
       setHiddenFields(form, null);
 
       var tp = window.tildaForm && window.tildaForm.tildapayment;
-      if (!hold || suspended || !tp || !tp.products || !tp.products.length) return;
+      if (!tp) return;
       /* Сторож знімає прострочений резерв двічі на секунду, але вкладка у фоні
          пригальмовує таймери — тож перевіряємо ще раз у сам момент оформлення,
          щоб замовлення не пішло зі знижкою за резервом, якого вже немає. */
-      if (!hold.expiresAt || hold.expiresAt < Date.now()) return;
+      if (!liveHold() || suspended || !tp.products || !tp.products.length) {
+        stripDeadBonusCode(tp);
+        return;
+      }
 
       var prodBefore = productsTotal(tp.products);
       var pl = planFor(tp.products, hold.amount);
-      if (pl.applied <= 0) return;
+      if (pl.applied <= 0) {
+        stripDeadBonusCode(tp);
+        return;
+      }
 
       // Усе, що в сумі до оплати понад товари (доставка), — до змін.
       var extra = round2(num(tp.amount) - (prodBefore - num(tp.discount)));
@@ -3496,6 +3665,30 @@ document.addEventListener("DOMContentLoaded", function () {
     function wrapPayment(orig) {
       return markWrapped(function () {
         var r = orig.apply(this, arguments);
+        /* Тільда зібрала оплату з нашим кодом, а бонуси в це замовлення не
+           підуть: прибираємо код із кошика (без перемальовування) і даємо
+           Тільді зібрати оплату ще раз — суми, знижки магазину, доставку й
+           суму для аналітики вона порахує сама, без нашої арифметики. Функція
+           Тільди лише заново збирає tildapayment, тож другий виклик безпечний. */
+        try {
+          var tp = window.tildaForm && window.tildaForm.tildapayment;
+          if (tp && isBonusCode(tp.promocode) && !willApply(tp)) {
+            dropDeadBonusCode(true, true);
+            r = orig.apply(this, arguments);
+            /* Вікно кошика перемальовуємо вже після відправки: якщо Тільда
+               відхилить замовлення з іншої причини, покупець має бачити
+               справжню суму, а не стару знижку. */
+            setTimeout(function () {
+              call("tcart__reDrawProducts");
+              call("tcart__reDrawTotal");
+              call("tcart__reDrawCartIcon");
+              if (!liveHold()) setNote(EXPIRED_NOTE, false);
+              render();
+            }, 0);
+          }
+        } catch (e) {
+          if (window.console && console.warn) console.warn("[bonus] rebuild", e);
+        }
         try {
           applyToPayment(arguments[0]);
         } catch (e) {
@@ -3553,9 +3746,8 @@ document.addEventListener("DOMContentLoaded", function () {
       }
     }
 
-    /* Повідомляє сервер, що резерв більше не потрібен — інакше бали лишались
-       зарезервованими ще 45 хвилин, і повторна спроба отримувала «немає
-       бонусів». keepalive — щоб запит долетів, навіть якщо вкладку
+    /* Повідомляє сервер, що резерв більше не потрібен, — щоб бали одразу
+       знову пропонувались на наступній спробі, а не через години. keepalive — щоб запит долетів, навіть якщо вкладку
        закривають. Відповідь не чекаємо: якщо запит загубиться, новий
        підтверджений код однаково замінить старий резерв. */
     function releaseOnServer(h) {
@@ -3965,6 +4157,22 @@ document.addEventListener("DOMContentLoaded", function () {
         });
     }
 
+    /* Enter у полі коду з SMS — це «Підтвердити», а не оформлення: поле стоїть
+       у формі кошика, і браузер на Enter відправляв усе замовлення без бонусів
+       (клік «Оформити» без резерву ми не тримаємо). */
+    document.addEventListener(
+      "keydown",
+      function (e) {
+        if (e.key !== "Enter" && e.keyCode !== 13) return;
+        var t = e.target;
+        if (!t || !t.getAttribute || t.getAttribute("data-rbr") !== "code") return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (!busy) confirmCode();
+      },
+      true,
+    );
+
     document.addEventListener("click", function (e) {
       var t = e.target;
       if (!t || !t.getAttribute) return;
@@ -3999,19 +4207,17 @@ document.addEventListener("DOMContentLoaded", function () {
       }
       wasOpen = open;
       if (!open) return;
-      if (hold && hold.expiresAt < Date.now()) {
-        hold = null;
-        lsSave(null);
-        view = "idle";
-        suspended = false;
-        dropDisplayedDiscount();
-        setNote("Час резерву минув — підтвердьте номер ще раз.", false);
-      }
+      // Спершу знімаємо код (поки hold ще стоїть), потім забуваємо резерв.
+      if (hold && !liveHold()) expireHold(false);
+      // Живого резерву немає — наш код у слоті мертвий, Тільда його відхилить.
+      if (!hold) dropDeadBonusCode();
       render();
       if (!hold) return;
 
       var pc = window.tcart && window.tcart.promocode;
-      if (pc && pc.promocode && pc.promocode !== hold.code) {
+      // Чужий BONUS-… — не промокод покупця: свій резерв не знімаємо, нижче
+      // applyHold покладе в слот наш код.
+      if (pc && pc.promocode && pc.promocode !== hold.code && !isBonusCode(pc.promocode)) {
         releaseOnServer(hold);
         hold = null;
         lsSave(null);
@@ -4061,6 +4267,9 @@ document.addEventListener("DOMContentLoaded", function () {
       document.addEventListener("submit", interceptCheckout, true);
       document.addEventListener("visibilitychange", function () {
         if (document.visibilityState === "visible" && cartOpen()) {
+          // Таймери у фоновій вкладці пригальмовані — строк резерву
+          // перевіряємо одразу, а не на наступному такті сторожа.
+          guard();
           backgroundCheck();
           availabilityCheck();
         }

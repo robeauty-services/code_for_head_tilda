@@ -22,6 +22,11 @@ const SITES = {
     head: "tilda_head_without_scripts/tilda_head.html",
     bundle: "dist/head.min.js",
     tilda: "robeauty.me — Tilda project 2095616",
+    // The project-wide «Опубликовать все страницы» re-publishes pages taken
+    // down on purpose (*-301-old, test copies, hidden 1=N offers): 09-12.11.2026.
+    publish:
+      "then open the folder «Активные страницы» in the page list and press «Опубликовать все» INSIDE it —\n" +
+      "NOT the project's «Опубликовать все страницы» (README, «Реліз»)",
   },
   manera: {
     build: "build:manera",
@@ -114,7 +119,7 @@ if (!version) {
 last step — paste ${site.head}
 into ${site.tilda}
   Site settings -> More -> HEAD code
-
+${site.publish ? "\n" + site.publish + "\n" : ""}
 nothing changes for visitors until you do.
 `);
   process.exit(0);
@@ -143,7 +148,7 @@ run("git", "push", "--quiet", "-u", "origin", branch);
 
 const body = `Pins ${site.tilda} to \`${tag}\` (was \`${was}\`) and rebuilds \`${site.bundle}\` from source.
 
-After merge, run \`npm run release:${name}\` on main to create and push the tag, then paste \`${site.head}\` into Tilda.`;
+After merge, run \`npm run release:${name}\` on main to create and push the tag, then paste \`${site.head}\` into Tilda${site.publish ? ", " + site.publish.replace(/\n/g, " ") : ""}.`;
 
 let pr = quiet("gh", "pr", "create", "--base", "main", "--head", branch, "--title", `release(${name}): ${tag}`, "--body", body);
 if (pr) pr = pr.split("\n").pop();
