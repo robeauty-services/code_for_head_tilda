@@ -4720,7 +4720,14 @@ document.addEventListener("DOMContentLoaded", function () {
         if (!form || !form.closest) return;
         if (!form.closest(".t706__orderform")) return;
         if (form.id !== MAIN_CART_FORM_ID) return;
-        if (!paysOnline(form)) return;
+        if (!paysOnline(form)) {
+          // A newer order paid on delivery: the record of an older failed card
+          // order must not send this customer to /payment-result (section 14).
+          try {
+            localStorage.removeItem(PAY_LINK_KEY);
+          } catch (err) {}
+          return;
+        }
 
         var tildaForm = window.tildaForm;
         var orderNo =
@@ -4908,5 +4915,200 @@ document.addEventListener("DOMContentLoaded", function () {
     var url = buildUrl(loc.pathname, loc.search, loc.hash, record);
     hist.replaceState(hist.state, "", url);
     debug("address restored", url);
+  } catch (e) {}
+})();
+
+/* ===================== 14. Failed payment -> /payment-result ===================== */
+/* WayForPay has one return address for every outcome, and in Tilda it is
+   /thanks. A customer whose card was declined landed on "thank you" and never
+   saw the page with "pay on delivery" / "try the card again" — she only found
+   it later through Viber or SMS.
+
+   On /thanks this block asks the payment-rescue backend about the order
+   section 12 recorded at submit (`localStorage.rb_pay_link`). Only a confirmed
+   refusal — `declined` or `expired` — moves the customer, with
+   location.replace, to /payment-result?ref=…&t=…. Everything else keeps her on
+   /thanks exactly as before: `approved`, `cod`, `reordered`, `pending` that
+   does not settle within about a minute, any HTTP error, no record, no answer.
+   A paid order is never redirected, so section 9 still fires its Purchase.
+
+   It only acts on a fresh record (section 12 wrote it within the last two
+   hours) and once per order per tab. Section 12 removes the record when a newer
+   order is paid on delivery, so an old failed order cannot hijack a new
+   /thanks. Every failure is swallowed; `console.debug` output only appears
+   with `window.RB_PAY_REDIRECT_DEBUG = true`.
+
+   Off switch: `window.RB_PAY_REDIRECT_OFF = true` before the bundle, or the
+   backend answering 404 for /status. Rollback: repin the bundle to the
+   previous tag. */
+(function () {
+  try {
+    var STATUS_URL =
+      "https://payment-handler.site/kommo_service/payment-rescue/status";
+    var THANKS_PATH = "/thanks";
+    var PAGE_PATH = "/payment-result";
+    var PAY_LINK_KEY = "rb_pay_link";
+    var DONE_PREFIX = "rb_pay_redirect:";
+    // A record older than this is not a return from the payment page.
+    var FRESH_MS = 2 * 60 * 60 * 1000;
+    // Seconds before each check: about a minute in all. WayForPay usually
+    // reports a refusal within seconds; slower cases are left to Viber/SMS.
+    var SCHEDULE = [0, 3, 4, 5, 8, 10, 15, 15];
+    var REQUEST_TIMEOUT_MS = 8000;
+
+    function debug(msg, data) {
+      if (window.RB_PAY_REDIRECT_DEBUG !== true) return;
+      if (window.console && console.debug) {
+        console.debug("[rb-pay-redirect]", msg, data);
+      }
+    }
+
+    // `/thanks/` and `/thanks` are the same page; thanks1, thx-claude are not.
+    function isThanks(pathname) {
+      var path = String(pathname || "");
+      if (path.length > 1) path = path.replace(/\/+$/, "");
+      return path === THANKS_PATH;
+    }
+
+    function parseRecord(raw) {
+      var record;
+      try {
+        record = JSON.parse(raw || "null");
+      } catch (e) {
+        return null;
+      }
+      if (!record || record.v !== 1) return null;
+      if (!record.ref || !record.t) return null;
+      if (typeof record.ts !== "number") return null;
+      return record;
+    }
+
+    function isFresh(record, now) {
+      if (!record) return false;
+      var age = now - record.ts;
+      return age >= 0 && age <= FRESH_MS;
+    }
+
+    /* What one answer of /status means here: "go", "stop" or "wait". */
+    function decide(httpStatus, body) {
+      if (httpStatus === 409 || httpStatus === 429 || httpStatus >= 500) {
+        return "wait";
+      }
+      if (httpStatus !== 200) return "stop";
+      var st = body && body.status;
+      if (st === "declined" || st === "expired") return "go";
+      if (st === "pending") return "wait";
+      return "stop";
+    }
+
+    function targetUrl(record) {
+      return (
+        PAGE_PATH +
+        "?ref=" +
+        encodeURIComponent(record.ref) +
+        "&t=" +
+        encodeURIComponent(record.t)
+      );
+    }
+
+    function statusUrl(record) {
+      return (
+        STATUS_URL +
+        "?ref=" +
+        encodeURIComponent(record.ref) +
+        "&t=" +
+        encodeURIComponent(record.t)
+      );
+    }
+
+    // The pure parts, so `npm test` can check them without a browser.
+    window.__rbPayRedirect = {
+      isThanks: isThanks,
+      parseRecord: parseRecord,
+      isFresh: isFresh,
+      decide: decide,
+      targetUrl: targetUrl,
+      SCHEDULE: SCHEDULE,
+    };
+
+    if (window.RB_PAY_REDIRECT_OFF === true) return;
+    var loc = window.location;
+    if (!loc || !loc.replace || !isThanks(loc.pathname)) return;
+    if (typeof fetch !== "function") return;
+
+    var record;
+    try {
+      record = parseRecord(localStorage.getItem(PAY_LINK_KEY));
+    } catch (e) {
+      record = null;
+    }
+    if (!isFresh(record, Date.now())) {
+      debug("no fresh record", record);
+      return;
+    }
+
+    var doneKey = DONE_PREFIX + record.ref;
+    try {
+      if (sessionStorage.getItem(doneKey)) {
+        debug("already redirected once for", record.ref);
+        return;
+      }
+    } catch (e) {}
+
+    function ask(cb) {
+      var settled = false;
+      var finish = function (code, body) {
+        if (settled) return;
+        settled = true;
+        cb(code, body);
+      };
+      var timer = setTimeout(function () {
+        finish(0, null);
+      }, REQUEST_TIMEOUT_MS);
+      fetch(statusUrl(record), { credentials: "omit", cache: "no-store" })
+        .then(function (r) {
+          if (r.status !== 200) return finish(r.status, null);
+          return r.json().then(
+            function (j) {
+              finish(200, j);
+            },
+            function () {
+              finish(200, null);
+            },
+          );
+        })
+        .catch(function () {
+          finish(0, null);
+        })
+        .then(function () {
+          clearTimeout(timer);
+        });
+    }
+
+    var step = 0;
+    function next() {
+      if (step >= SCHEDULE.length) {
+        debug("no refusal within the schedule, staying on /thanks");
+        return;
+      }
+      var delay = SCHEDULE[step] * 1000;
+      step += 1;
+      setTimeout(function () {
+        ask(function (code, body) {
+          // No answer at all (network, adblock, timeout) is worth a retry.
+          var verdict = code === 0 ? "wait" : decide(code, body);
+          debug("answer", { code: code, body: body, verdict: verdict });
+          if (verdict === "go") {
+            try {
+              sessionStorage.setItem(doneKey, "1");
+            } catch (e) {}
+            loc.replace(targetUrl(record));
+            return;
+          }
+          if (verdict === "wait") next();
+        });
+      }, delay);
+    }
+    next();
   } catch (e) {}
 })();
