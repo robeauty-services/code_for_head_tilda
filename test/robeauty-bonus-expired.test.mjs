@@ -128,6 +128,9 @@ const setup = (opts = {}) => {
   const promoInput = el("input");
   const promoBtn = el("div");
   let redeem = null;
+  const codeInput = el("input");
+  codeInput.attrs["data-rbr"] = "code";
+  codeInput.value = opts.smsCode ?? "123456";
   formBody.insertBefore = (c, ref) => {
     redeem = c;
     ref.previousSibling = c;
@@ -145,7 +148,7 @@ const setup = (opts = {}) => {
       if (sel === ".t-inputpromocode") return promoInput;
       if (sel === ".t-inputpromocode__btn") return promoBtn;
       if (sel === ".rb-redeem") return redeem;
-      if (sel === '[data-rbr="code"]') return null;
+      if (sel === '[data-rbr="code"]') return codeInput;
       return null;
     },
   };
@@ -180,8 +183,15 @@ const setup = (opts = {}) => {
     console: { warn() {} },
     getComputedStyle: () => ({ display: open ? "block" : "none" }),
   };
+  /* Tilda's CartCalculator (cart 1.1), the one behaviour that matters here:
+   * a parked promo code (`appliedPromocode`) goes back into the empty slot on
+   * the next recalculation (store discount smaller than the promo — here there
+   * is none). `sticky` is a code Tilda keeps putting back whatever we do. */
+  window.cartCalculator = { appliedPromocode: opts.parked ? { ...opts.parked } : null };
   const recalc = () => {
     const c = window.tcart;
+    if (opts.sticky) c.promocode = { ...opts.sticky };
+    else if (!c.promocode && window.cartCalculator.appliedPromocode) c.promocode = { ...window.cartCalculator.appliedPromocode };
     let prod = 0;
     for (const p of c.products) {
       if (p.deleted === "yes") continue;
@@ -223,6 +233,7 @@ const setup = (opts = {}) => {
   /* What tilda-forms-payments does with the cart (fields that matter here). */
   const tildaAddPaymentInfo = function () {
     const c = window.tcart;
+    window.tildaForm.amountForStat = c.amount;
     const tp = { amount: c.amount };
     if (c.promocode && c.promocode.promocode) {
       tp.promocode = c.promocode.promocode;
@@ -270,6 +281,21 @@ const setup = (opts = {}) => {
     for (const l of listeners) if (l.type === "click" && l.capture) l.fn(ev);
     return ev;
   };
+  const keyEnter = (target) => {
+    const ev = {
+      type: "keydown",
+      key: "Enter",
+      keyCode: 13,
+      target,
+      prevented: false,
+      preventDefault() {
+        ev.prevented = true;
+      },
+      stopPropagation() {},
+    };
+    for (const l of listeners) if (l.type === "keydown") l.fn(ev);
+    return ev;
+  };
   /* Tilda's submit: builds tildapayment through the (wrapped) hook. */
   const tildaSubmit = () => {
     window.tildaForm.addPaymentInfoToForm(cartForm);
@@ -288,6 +314,9 @@ const setup = (opts = {}) => {
     submitBtn,
     guard,
     checkoutClick,
+    keyEnter,
+    codeInput,
+    phone,
     tildaSubmit,
     hidden,
     note: () => (redeem ? redeem.innerHTML : ""),
@@ -497,4 +526,73 @@ test("hold runs out while «Оформити» waits for the server: the click i
   assert.equal(s.submitBtn.clicks, 0);
   assert.equal(s.window.tcart.promocode, undefined);
   assert.match(s.note(), /Час резерву минув/);
+});
+
+test("hold runs out while «Оформити» waits, and the guard expires it first: still no replay", async () => {
+  const s = setup({ hold: liveHold({ expiresAt: T0 + 2000 }) });
+  s.guard();
+  const ev = s.checkoutClick();
+  assert.equal(ev.prevented, true);
+  s.tick(3000);
+  s.guard(); // the 500 ms timer runs while /status is in flight
+  assert.equal(s.window.tcart.promocode, undefined);
+  await flush();
+  await flush();
+  assert.equal(s.submitBtn.clicks, 0, "no silent order at the full price");
+  assert.match(s.note(), /Час резерву минув/);
+  assert.match(s.note(), /rb-redeem__note--err/);
+});
+
+test("Tilda's calculator parked our code: it is forgotten too, nothing comes back, checkout not blocked", () => {
+  const s = setup({ hold: liveHold({ expiresAt: T0 - MIN }), parked: { promocode: CODE, discountsum: 300 } });
+  s.guard();
+  assert.equal(s.window.cartCalculator.appliedPromocode, null);
+  assert.equal(s.window.tcart.promocode, undefined);
+  s.window.tcart__updateTotalProductsinCartObj(); // e.g. an item removed
+  assert.equal(s.window.tcart.promocode, undefined, "no resurrection");
+  assert.equal(s.window.tcart.amount, 2000);
+  const ev = s.checkoutClick();
+  assert.equal(ev.prevented, false);
+  const tp = s.tildaSubmit();
+  assert.equal(tp.promocode, undefined);
+  assert.equal(tp.amount, 2000);
+});
+
+test("a code Tilda keeps putting back never locks checkout; the payment goes without it at the full sum", () => {
+  const s = setup({ sticky: { promocode: CODE, discountsum: 300 } });
+  s.guard();
+  assert.equal(s.window.tcart.promocode.promocode, CODE, "sticky by construction");
+  for (let i = 0; i < 3; i++) {
+    const ev = s.checkoutClick();
+    assert.equal(ev.prevented, false, "click " + (i + 1) + " must go through");
+  }
+  const tp = s.tildaSubmit();
+  assert.equal(tp.promocode, undefined);
+  assert.equal(tp.discount, undefined);
+  assert.equal(tp.amount, 2000);
+  assert.equal(s.window.tildaForm.amountForStat, 2000, "purchase value = what was sent");
+  assert.equal(s.hidden("bonus_ref"), null);
+});
+
+test("payment rebuild: Tilda builds the payment again without the code; cart and purchase value are full", () => {
+  const s = setup({ hold: liveHold(), delivery: 70 });
+  s.guard();
+  s.tick(50 * MIN);
+  const tp = s.tildaSubmit();
+  assert.equal(tp.promocode, undefined);
+  assert.equal(tp.amount, 2070);
+  assert.equal(s.window.tildaForm.amountForStat, 2070);
+  assert.equal(s.window.tcart.promocode, undefined, "cart (and localStorage tcart for section 12) without the code");
+  assert.equal(s.window.tcart.amount, 2070);
+});
+
+test("Enter in the SMS code field confirms the code instead of submitting the order", async () => {
+  const s = setup({ phone: "+38 (067) 111-22-33" });
+  const ev = s.keyEnter(s.codeInput);
+  assert.equal(ev.prevented, true, "no implicit form submission");
+  await flush();
+  assert.ok(s.calls.some((c) => c.path === "/verify" && c.body.code === "123456"));
+  // Enter anywhere else is left alone.
+  const ev2 = s.keyEnter(s.phone);
+  assert.equal(ev2.prevented, false);
 });
