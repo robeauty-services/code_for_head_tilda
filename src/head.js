@@ -1390,6 +1390,33 @@ document.addEventListener("DOMContentLoaded", function () {
       }
     };
 
+    /* Заказ, спасённый на /payment-result: післяплата или оплаченный повторный
+       счёт. Тильда о таком заказе не узнаёт, поэтому бэкенд его не подтвердит
+       никогда и запись ждала бы вечно. Секция 15 отпускает её через
+       `rbPaidGate` — единственный объект, общий у секций 3 и 9. */
+    var firePendingFor = function (orderId) {
+      var id = String(orderId || "");
+      if (!id) return;
+      var raw = null;
+      try {
+        raw = localStorage.getItem("rb_meta_pending");
+      } catch (error) {
+        return;
+      }
+      if (!raw) return;
+      var data = null;
+      try {
+        data = JSON.parse(raw);
+      } catch (error) {
+        return;
+      }
+      if (!data || String(data.orderId || "") !== id) return;
+      firePendingPurchase(data);
+    };
+    if (window.rbPaidGate) {
+      window.rbPaidGate.firePendingFor = firePendingFor;
+    }
+
     var pendingDataStr = localStorage.getItem("rb_meta_pending");
     if (pendingDataStr) {
       var pendingData = null;
@@ -2777,7 +2804,11 @@ document.addEventListener("DOMContentLoaded", function () {
       setTimeout(step, schedule[0] * 1000);
     }
 
-    window.rbPaidGate = { whenPaid: whenPaid, isExpired: isExpired };
+    window.rbPaidGate = {
+      whenPaid: whenPaid,
+      isExpired: isExpired,
+      releaseHeldFor: releaseHeldFor,
+    };
 
     /* ---------- hold: Tilda's announcement at submit ---------- */
 
@@ -2901,6 +2932,16 @@ document.addEventListener("DOMContentLoaded", function () {
       }
     }
 
+    /* Tilda's announcement, pushed unchanged. The record is re-read first:
+       another tab may have released it while this one was asking. */
+    function pushHeld(id) {
+      var now = readHeld();
+      if (!now || now.id !== id) return;
+      localStorage.removeItem(HELD_KEY);
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push(now.push);
+    }
+
     function releaseHeld() {
       var held = readHeld();
       if (!held) return;
@@ -2909,13 +2950,25 @@ document.addEventListener("DOMContentLoaded", function () {
         return;
       }
       whenPaid(held.id, function () {
-        // Another tab may have released it while this one was asking.
-        var now = readHeld();
-        if (!now || now.id !== held.id) return;
-        localStorage.removeItem(HELD_KEY);
-        window.dataLayer = window.dataLayer || [];
-        window.dataLayer.push(now.push);
+        pushHeld(held.id);
       });
+    }
+
+    /* Released without asking the backend, for one order only. An order
+       rescued on /payment-result — cash on delivery, or a retry invoice paid
+       at WayForPay — never reaches tilda-orders, so `whenPaid` would wait for
+       it forever. Section 15 is the only caller, and it asks only when it
+       already knows this order is settled. */
+    function releaseHeldFor(rawId) {
+      var id = bareOrderId(rawId);
+      if (!id) return;
+      var held = readHeld();
+      if (!held || bareOrderId(held.id) !== id) return;
+      if (isExpired(held.ts)) {
+        localStorage.removeItem(HELD_KEY);
+        return;
+      }
+      pushHeld(held.id);
     }
 
     installHold();
@@ -4263,7 +4316,10 @@ document.addEventListener("DOMContentLoaded", function () {
     var SENT_PREFIX = "rb_cart_snapshot_sent:";
     // The /payment-result token: section 13 reads it, the server gets it too.
     var PAY_LINK_KEY = "rb_pay_link";
-    var PAY_LINK_TTL_MS = 72 * 60 * 60 * 1000;
+    // The server gives the token exactly a day (TOKEN_TTL_HOURS in
+    // kommo-service/paymentRescue/token.ts), counted from the snapshot it is
+    // stored with. A record kept longer would only rebuild a dead link.
+    var PAY_LINK_TTL_MS = 24 * 60 * 60 * 1000;
     var TILDA_PROJECT = "2095616";
     var MAX_PRODUCTS = 50;
     var MAX_TEXT = 200;
@@ -4404,6 +4460,14 @@ document.addEventListener("DOMContentLoaded", function () {
       return match && match[1] ? cut(match[1]) : "";
     }
 
+    /* The article travels inside the name — Tilda's order buttons put it
+       there, and section 10 appends it when a discount lands on a catalogue
+       line — but /payment-result shows that name to the customer. It goes in
+       `sku` instead, and `tcart` itself is left alone. */
+    function cleanName(text) {
+      return String(text || "").replace(/\s*\[sku:[^\]]*\]/i, "");
+    }
+
     /* SKU of a line: `[sku:…]` in the name, which is how the order buttons put
        it there, otherwise Tilda's own fields. Same source as section 5. */
     function skuOf(product) {
@@ -4493,7 +4557,7 @@ document.addEventListener("DOMContentLoaded", function () {
         if (items.length >= MAX_PRODUCTS) break;
         var product = products[i] || {};
         var item = {
-          name: cut(product.name),
+          name: cut(cleanName(product.name)),
           sku: skuOf(product),
           quantity: parseInt(product.quantity, 10) || 1,
           price: toNumber(product.price),
@@ -4820,15 +4884,17 @@ document.addEventListener("DOMContentLoaded", function () {
    must keep working — and `history.replaceState` keeps the history entry and
    its state, so Back behaves as before. Nothing else on the page is touched
    and the record is left in place, so a reload works the same; it ages out on
-   its own after 72 hours. Every failure is swallowed; `console.debug` output
-   only appears with `window.RB_PAY_LINK_DEBUG = true`.
+   its own after 24 hours, when the token dies on the server too. Every failure
+   is swallowed; `console.debug` output only appears with
+   `window.RB_PAY_LINK_DEBUG = true`.
 
    Rollback: repin the bundle to @robeauty-v1.0.30. */
 (function () {
   try {
     var PAGE_PATH = "/payment-result";
     var PAY_LINK_KEY = "rb_pay_link";
-    var PAY_LINK_TTL_MS = 72 * 60 * 60 * 1000;
+    // As long as the server honours the token: TOKEN_TTL_HOURS = 24.
+    var PAY_LINK_TTL_MS = 24 * 60 * 60 * 1000;
 
     function debug(msg, data) {
       if (window.RB_PAY_LINK_DEBUG !== true) return;
@@ -5110,5 +5176,259 @@ document.addEventListener("DOMContentLoaded", function () {
       }, delay);
     }
     next();
+  } catch (e) {}
+})();
+
+/* ===================== 15. Rescued payment -> purchase events ===================== */
+/* A refused card leaves the purchase events held: the GA4 purchase and the
+   Google Ads conversions wait in `rb_held_purchase` (section 9), the Meta and
+   TikTok Purchase in `rb_meta_pending` (section 3). Both wait for tilda-orders
+   to confirm a paid order, and for a rescued order that confirmation never
+   comes: Tilda learns nothing about the switch to cash on delivery or about
+   the retry invoice, so the order never reaches our backend and the purchase
+   was lost for good.
+
+   This block releases what is held, in the two places where the rescue shows:
+
+   - on /payment-result, where the page block announces it in `dataLayer` as
+     `cod_switch_success` or `payment_retry_success`;
+   - on any page, when the retry invoice was paid: WayForPay returns to the
+     site root, not to /payment-result, so that announcement never happens.
+     The marker the block leaves behind (`rb_pay_result`) says which order it
+     was, and one question to /payment-rescue/status says whether it was paid.
+     Only "approved" releases anything.
+
+   The order number must match the one in the record, and sections 3 and 9
+   delete their record as they send it, so a purchase goes out once. Nothing
+   held on this device — she opened the Viber link on her phone — means nothing
+   is sent: this block never builds a purchase of its own.
+
+   `dataLayer.push` is not replaced: GTM swaps it for its own function whenever
+   it loads. The array is read with a cursor instead, which also picks up an
+   announcement pushed before this block started looking.
+
+   Apart from the two records, cleared through sections 3 and 9, it only reads.
+   Every failure is swallowed; `console.debug` output only appears with
+   `window.RB_RESCUE_DEBUG = true`.
+
+   Rollback: repin the bundle to @robeauty-v1.0.33. */
+(function () {
+  try {
+    var PAGE_PATH = "/payment-result";
+    var STATUS_URL =
+      "https://payment-handler.site/kommo_service/payment-rescue/status";
+    // What the page block pushes once the rescue went through.
+    var EVENTS = ["cod_switch_success", "payment_retry_success"];
+    var HELD_KEY = "rb_held_purchase";
+    var PENDING_KEY = "rb_meta_pending";
+    // The page block writes this one, not us: {ref, result, ts}.
+    var RESULT_KEY = "rb_pay_result";
+    var PAY_LINK_KEY = "rb_pay_link";
+    // The link and its token die with the snapshot, a day after the order.
+    var FRESH_MS = 24 * 60 * 60 * 1000;
+    var POLL_MS = 300;
+    // The page is open for minutes; after that no announcement is coming.
+    var MAX_MS = 15 * 60 * 1000;
+    var REQUEST_TIMEOUT_MS = 8000;
+
+    function debug(msg, data) {
+      if (window.RB_RESCUE_DEBUG !== true) return;
+      if (window.console && console.debug) {
+        console.debug("[rb-rescue]", msg, data);
+      }
+    }
+
+    function readJson(key) {
+      try {
+        return JSON.parse(localStorage.getItem(key) || "null");
+      } catch (e) {
+        return null;
+      }
+    }
+
+    /* Tilda's stat id is `T202609-1374965894`; the order is the digits. */
+    function bareOrderId(raw) {
+      var id = String(raw == null ? "" : raw)
+        .trim()
+        .replace(/^T\d+-/i, "");
+      return /^\d{6,12}$/.test(id) ? id : "";
+    }
+
+    /* The WayForPay reference is `<project>_<order>`. */
+    function orderFromRef(ref) {
+      var match = String(ref == null ? "" : ref).match(/(\d{6,12})$/);
+      return match ? match[1] : "";
+    }
+
+    // `/payment-result/` and `/payment-result` are the same page.
+    function samePage(pathname) {
+      var path = String(pathname || "");
+      if (path.length > 1) path = path.replace(/\/+$/, "");
+      return path === PAGE_PATH;
+    }
+
+    /* The order a held record belongs to, "" when there is no record. */
+    function heldOrder() {
+      var held = readJson(HELD_KEY);
+      return held ? bareOrderId(held.id) : "";
+    }
+
+    function pendingOrder() {
+      var pending = readJson(PENDING_KEY);
+      return pending ? bareOrderId(pending.orderId) : "";
+    }
+
+    function hasRecordFor(order) {
+      if (!order) return false;
+      return heldOrder() === order || pendingOrder() === order;
+    }
+
+    /* Is anything held here at all? A raw look, without parsing: the watcher
+       below asks three times a second, and a held GA4 push is not small. */
+    function anyRecordStored() {
+      try {
+        return !!(
+          localStorage.getItem(HELD_KEY) || localStorage.getItem(PENDING_KEY)
+        );
+      } catch (e) {
+        return false;
+      }
+    }
+
+    /* Sections 9 and 3 do the sending, each from its own record, and each
+       deletes that record — so this cannot send the same purchase twice. */
+    function release(order) {
+      var gate = window.rbPaidGate;
+      if (!gate) return;
+      try {
+        if (gate.releaseHeldFor) gate.releaseHeldFor(order);
+      } catch (e) {}
+      try {
+        if (gate.firePendingFor) gate.firePendingFor(order);
+      } catch (e) {}
+      debug("released", order);
+    }
+
+    /* ---------- on /payment-result: the announcement in dataLayer ---------- */
+
+    var seen = 0;
+
+    function scan() {
+      var dl = window.dataLayer;
+      if (!dl || !dl.length) return;
+      while (seen < dl.length) {
+        var item = dl[seen] || {};
+        seen++;
+        var name = String(item.event || "");
+        if (!name) continue;
+        var known = false;
+        for (var i = 0; i < EVENTS.length; i++) {
+          if (EVENTS[i] === name) known = true;
+        }
+        if (!known) continue;
+        var order = orderFromRef(item.order_ref);
+        debug("announcement", name);
+        // Somebody else's order: her records stay where they are.
+        if (hasRecordFor(order)) release(order);
+      }
+    }
+
+    function watchAnnouncements() {
+      var started = Date.now();
+      scan();
+      var timer = setInterval(function () {
+        try {
+          scan();
+          if (!anyRecordStored() || Date.now() - started > MAX_MS) {
+            clearInterval(timer);
+          }
+        } catch (e) {
+          clearInterval(timer);
+        }
+      }, POLL_MS);
+    }
+
+    /* ---------- anywhere: the retry invoice paid at WayForPay ---------- */
+
+    /* The order to ask about, or null. The marker must be a retry of this
+       day, it must point at the same order as our own record of the link, and
+       there must be something held for that order — otherwise there is no
+       reason to ask anybody anything. */
+    function retryTarget(now) {
+      var result = readJson(RESULT_KEY);
+      if (!result || String(result.result || "") !== "retry") return null;
+      var age = now - (typeof result.ts === "number" ? result.ts : 0);
+      if (age < 0 || age > FRESH_MS) return null;
+      var link = readJson(PAY_LINK_KEY);
+      if (!link || link.v !== 1 || !link.ref || !link.t) return null;
+      if (String(link.ref) !== String(result.ref)) return null;
+      var order = bareOrderId(link.order) || orderFromRef(link.ref);
+      if (!hasRecordFor(order)) return null;
+      return { ref: String(link.ref), t: String(link.t), order: order };
+    }
+
+    /* One question per page load. Only "approved" releases anything; every
+       other answer, and every failure, leaves the records as they are. */
+    function askStatus(target) {
+      var url =
+        STATUS_URL +
+        "?ref=" +
+        encodeURIComponent(target.ref) +
+        "&t=" +
+        encodeURIComponent(target.t);
+      var ctl =
+        typeof AbortController === "function" ? new AbortController() : null;
+      var timer = setTimeout(function () {
+        if (ctl) ctl.abort();
+      }, REQUEST_TIMEOUT_MS);
+      fetch(url, {
+        credentials: "omit",
+        cache: "no-store",
+        signal: ctl ? ctl.signal : undefined,
+      })
+        .then(function (r) {
+          return r && r.ok ? r.json() : null;
+        })
+        .then(function (body) {
+          clearTimeout(timer);
+          var status = body ? String(body.status || "").toLowerCase() : "";
+          debug("retry status", status);
+          if (status !== "approved") return;
+          if (!hasRecordFor(target.order)) return;
+          release(target.order);
+        })
+        .catch(function () {
+          clearTimeout(timer);
+          debug("retry status failed");
+        });
+    }
+
+    // The pure parts, so `npm test` can check them without a browser.
+    window.__rbRescue = {
+      samePage: samePage,
+      orderFromRef: orderFromRef,
+      retryTarget: retryTarget,
+      hasRecordFor: hasRecordFor,
+    };
+
+    var onReady = function () {
+      try {
+        if (!anyRecordStored()) {
+          debug("nothing held on this device");
+          return;
+        }
+        if (samePage(window.location.pathname)) watchAnnouncements();
+        var target = retryTarget(Date.now());
+        if (target) askStatus(target);
+      } catch (e) {}
+    };
+
+    // Section 3 installs `firePendingFor` on DOMContentLoaded, and its
+    // listener was registered before this one, so by now the gate is whole.
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", onReady);
+    } else {
+      onReady();
+    }
   } catch (e) {}
 })();

@@ -6,7 +6,7 @@
  *   parseRecord / isFresh    -> what counts as a usable record
  *   buildUrl                 -> the address it hands to history.replaceState
  *
- * The block (from the section 13 header to the end of the file) runs in
+ * The block (from the section 13 header to the section 14 one) runs in
  * node:vm with a fake window, history and storage. No dependencies: `npm test`.
  */
 import { test } from "node:test";
@@ -17,7 +17,8 @@ import vm from "node:vm";
 const source = readFileSync(new URL("../src/head.js", import.meta.url), "utf8");
 const lines = source.split("\n");
 const start = lines.findIndex((l) => l.startsWith("/* ===================== 13. Payment result link"));
-const block = lines.slice(start).join("\n");
+const end = lines.findIndex((l) => l.startsWith("/* ===================== 14. Failed payment"));
+const block = lines.slice(start, end).join("\n");
 
 const NOW = 1_700_000_000_000;
 const RECORD = { v: 1, ref: "2095616_1158838403", order: "1158838403", t: "Zm9vYmFyYmF6cXV1eA", ts: NOW };
@@ -63,13 +64,13 @@ test("other pages are never touched", () => {
 });
 
 test("a record that is too old, broken or missing changes nothing", () => {
-  assert.equal(load({ record: Object.assign({}, RECORD, { ts: NOW - 73 * 3600 * 1000 }) }).calls.length, 0);
+  assert.equal(load({ record: Object.assign({}, RECORD, { ts: NOW - 25 * 3600 * 1000 }) }).calls.length, 0);
   assert.equal(load({ record: Object.assign({}, RECORD, { ts: NOW + 60 * 1000 }) }).calls.length, 0);
   assert.equal(load({ record: Object.assign({}, RECORD, { v: 2 }) }).calls.length, 0);
   assert.equal(load({ record: Object.assign({}, RECORD, { t: "" }) }).calls.length, 0);
   assert.equal(load({ record: null }).calls.length, 0);
   // Three hours before the deadline it still works.
-  assert.equal(load({ record: Object.assign({}, RECORD, { ts: NOW - 69 * 3600 * 1000 }) }).calls.length, 1);
+  assert.equal(load({ record: Object.assign({}, RECORD, { ts: NOW - 21 * 3600 * 1000 }) }).calls.length, 1);
 });
 
 test("parameters the page already carried, and the hash, survive", () => {

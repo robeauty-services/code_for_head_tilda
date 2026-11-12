@@ -1,7 +1,7 @@
 /* Section 14 (failed payment -> /payment-result): on /thanks, a confirmed card
  * refusal sends the customer to /payment-result?ref=…&t=…; anything else keeps
  * her on /thanks. Runs the section in node:vm with fake window, storage, fetch
- * and timers. The block = src/head.js from the section 14 header to the end.
+ * and timers. The block = src/head.js from header 14 to header 15.
  * No dependencies: `npm test`.
  */
 import { test } from "node:test";
@@ -13,7 +13,8 @@ const SRC = new URL("../src/head.js", import.meta.url);
 const source = readFileSync(SRC, "utf8");
 const lines = source.split("\n");
 const start = lines.findIndex((l) => l.startsWith("/* ===================== 14. Failed payment"));
-const block = lines.slice(start).join("\n");
+const end = lines.findIndex((l) => l.startsWith("/* ===================== 15. Rescued payment"));
+const block = lines.slice(start, end).join("\n");
 
 const NOW = 1_700_000_000_000;
 const RECORD = { v: 1, ref: "2095616_1158838403", order: "1158838403", t: "Zm9vYmFyYmF6cXV1eA", ts: NOW - 60_000 };
