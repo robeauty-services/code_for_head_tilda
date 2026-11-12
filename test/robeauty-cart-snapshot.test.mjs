@@ -194,10 +194,33 @@ test("products: name, sku, quantity, price, url", () => {
     ],
   };
   assert.deepEqual(plain(api.collectProducts(cart)), [
-    { name: "Сыворотка [sku:00-00003666]", sku: "00-00003666", quantity: 2, price: 890, url: "https://robeauty.me/serum" },
+    { name: "Сыворотка", sku: "00-00003666", quantity: 2, price: 890, url: "https://robeauty.me/serum" },
     { name: "Крем", sku: "00-00001111", quantity: 1, price: 1540.5, url: "" },
     { name: "Набор", sku: "777", quantity: 1, price: 0, url: "" },
   ]);
+});
+
+test("products: [sku:…] is cut from the name and kept in `sku`", () => {
+  const names = (products) => plain(api.collectProducts({ products })).map((p) => [p.name, p.sku]);
+  assert.deepEqual(
+    names([
+      { name: "Сироватка [sku:00-00003666]", quantity: 1, price: 1 },
+      { name: "Крем [sku: KU-0003381 ]", quantity: 1, price: 1 },
+      { name: "Набір [SKU:00-00001111]", quantity: 1, price: 1 },
+      { name: "Маска[sku:00-00000026]", quantity: 1, price: 1 },
+      // Nothing to cut: the name is sent as it is, `sku` comes from Tilda.
+      { name: "Пінка", sku: "00-00002041", quantity: 1, price: 1 },
+      { name: "Тонік", quantity: 1, price: 1 },
+    ]),
+    [
+      ["Сироватка", "00-00003666"],
+      ["Крем", "KU-0003381"],
+      ["Набір", "00-00001111"],
+      ["Маска", "00-00000026"],
+      ["Пінка", "00-00002041"],
+      ["Тонік", ""],
+    ],
+  );
 });
 
 test("products: an empty cart gives an empty list", () => {
