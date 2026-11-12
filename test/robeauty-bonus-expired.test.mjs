@@ -215,9 +215,11 @@ const setup = (opts = {}) => {
     redraws.push(window.tcart.promocode ? window.tcart.promocode.promocode : null);
     recalc();
   };
-  for (const n of ["tcart__saveLocalObj", "tcart__reDrawProducts", "tcart__reDrawTotal", "tcart__reDrawCartIcon"]) {
+  const shown = []; // total the cart window shows after each tcart__reDrawTotal
+  for (const n of ["tcart__saveLocalObj", "tcart__reDrawProducts", "tcart__reDrawCartIcon"]) {
     window[n] = () => {};
   }
+  window.tcart__reDrawTotal = () => shown.push(window.tcart.amount);
   window.tcart = {
     products: plain(
       opts.products ?? [
@@ -311,6 +313,7 @@ const setup = (opts = {}) => {
     store,
     calls,
     redraws,
+    shown,
     submitBtn,
     guard,
     checkoutClick,
@@ -584,6 +587,16 @@ test("payment rebuild: Tilda builds the payment again without the code; cart and
   assert.equal(s.window.tildaForm.amountForStat, 2070);
   assert.equal(s.window.tcart.promocode, undefined, "cart (and localStorage tcart for section 12) without the code");
   assert.equal(s.window.tcart.amount, 2070);
+});
+
+test("payment rebuild: if Tilda then refuses the order, the cart window shows the real sum", async () => {
+  const s = setup({ promocode: { promocode: CODE, discountsum: 300 } });
+  s.tildaSubmit(); // the click went through (no hold), Tilda builds the payment
+  const before = s.shown.length;
+  await flush();
+  assert.ok(s.shown.length > before, "redrawn after the send");
+  assert.equal(s.shown[s.shown.length - 1], 2000);
+  assert.match(s.note(), /Час резерву минув/);
 });
 
 test("Enter in the SMS code field confirms the code instead of submitting the order", async () => {

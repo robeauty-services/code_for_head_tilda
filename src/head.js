@@ -3675,6 +3675,16 @@ document.addEventListener("DOMContentLoaded", function () {
           if (tp && isBonusCode(tp.promocode) && !willApply(tp)) {
             dropDeadBonusCode(true, true);
             r = orig.apply(this, arguments);
+            /* Вікно кошика перемальовуємо вже після відправки: якщо Тільда
+               відхилить замовлення з іншої причини, покупець має бачити
+               справжню суму, а не стару знижку. */
+            setTimeout(function () {
+              call("tcart__reDrawProducts");
+              call("tcart__reDrawTotal");
+              call("tcart__reDrawCartIcon");
+              if (!liveHold()) setNote(EXPIRED_NOTE, false);
+              render();
+            }, 0);
           }
         } catch (e) {
           if (window.console && console.warn) console.warn("[bonus] rebuild", e);
