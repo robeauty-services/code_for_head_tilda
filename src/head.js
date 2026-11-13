@@ -5207,6 +5207,19 @@ document.addEventListener("DOMContentLoaded", function () {
    does not settle within about a minute, any HTTP error, no record, no answer.
    A paid order is never redirected, so section 9 still fires its Purchase.
 
+   While the checks run the page is hidden behind a white screen with
+   "Перевіряємо оплату…" and a spinner: a customer whose card was refused used
+   to read "Замовлення прийнято" and see the upsell block for about three
+   seconds before being moved. The screen is a class on <html> plus one
+   <style>, so nothing has to be built inside the hidden <body> and there is
+   no flash of content. It comes off on the first answer that is not a
+   refusal, at the end of the schedule, on any error caught here, and in any
+   case after LOADER_MAX_MS — the checks carry on after that ceiling, and a
+   late refusal still moves the customer. A confirmed refusal keeps the screen
+   on until /payment-result paints. Its own off switch is
+   `window.RB_PAY_LOADER_OFF = true`: the checks and the redirect stay, the
+   screen does not appear.
+
    It only acts on a fresh record (section 12 wrote it within the last two
    hours) and once per order per tab. Section 12 removes the record when a newer
    order is paid on delivery, so an old failed order cannot hijack a new
@@ -5230,12 +5243,87 @@ document.addEventListener("DOMContentLoaded", function () {
     // reports a refusal within seconds; slower cases are left to Viber/SMS.
     var SCHEDULE = [0, 3, 4, 5, 8, 10, 15, 15];
     var REQUEST_TIMEOUT_MS = 8000;
+    // The class is on <html>, so the loader itself lives outside the hidden
+    // <body> — see LOADER_CSS, where the same name is spelled out.
+    var LOADER_CLASS = "rb-pay-checking";
+    var LOADER_STYLE_ID = "robeauty-pay-loader-style";
+    // However the checks end, the page is never hidden for longer than this.
+    var LOADER_MAX_MS = 8000;
+    var LOADER_CSS =
+      "html.rb-pay-checking body{visibility:hidden}" +
+      "html.rb-pay-checking::before{content:'Перевіряємо оплату…';" +
+      "position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483646;" +
+      "display:flex;align-items:center;justify-content:center;" +
+      "padding-top:52px;background:#fff;color:#2d2d2d;text-align:center;" +
+      "font:400 17px/1.4 'CenturyGothic',Arial,sans-serif}" +
+      "html.rb-pay-checking::after{content:'';position:fixed;top:50%;left:50%;" +
+      "z-index:2147483647;width:28px;height:28px;margin:-48px 0 0 -14px;" +
+      "border:3px solid rgba(0,0,0,.15);border-top-color:#1a1a1a;" +
+      "border-radius:50%;animation:rb-pay-spin .8s linear infinite}" +
+      "@keyframes rb-pay-spin{to{transform:rotate(360deg)}}" +
+      "@media (prefers-reduced-motion:reduce){" +
+      "html.rb-pay-checking::after{animation:none}}";
 
     function debug(msg, data) {
       if (window.RB_PAY_REDIRECT_DEBUG !== true) return;
       if (window.console && console.debug) {
         console.debug("[rb-pay-redirect]", msg, data);
       }
+    }
+
+    /* ---------- the white screen shown while the checks run ---------- */
+
+    var loaderOn = false;
+    /* Set the moment a refusal is confirmed. After that the page must stay
+       hidden until /payment-result paints: unhiding it — the ceiling below is
+       the only candidate — would flash exactly the "order accepted" this
+       block exists to hide. */
+    var redirecting = false;
+
+    function setLoaderClass(on) {
+      var root = document.documentElement;
+      if (!root) return;
+      if (root.classList) {
+        if (on) root.classList.add(LOADER_CLASS);
+        else root.classList.remove(LOADER_CLASS);
+        return;
+      }
+      // Safari before 5.1 has no classList, and className is a plain string.
+      var names = (" " + String(root.className || "") + " ").replace(
+        " " + LOADER_CLASS + " ",
+        " ",
+      );
+      if (on) names += LOADER_CLASS;
+      root.className = names.replace(/^\s+|\s+$/g, "");
+    }
+
+    /* One <style> with an id, inserted once — the same shape as the cart
+       styles in section 10. The bundle is a synchronous script in <head>, so
+       this runs before <body> exists and nothing is ever painted unhidden. */
+    function showLoader() {
+      if (window.RB_PAY_LOADER_OFF === true) return;
+      try {
+        var head = document.head || document.getElementsByTagName("head")[0];
+        if (!head || !document.documentElement) return;
+        if (!document.getElementById(LOADER_STYLE_ID)) {
+          var style = document.createElement("style");
+          style.id = LOADER_STYLE_ID;
+          style.textContent = LOADER_CSS;
+          head.appendChild(style);
+        }
+        setLoaderClass(true);
+        loaderOn = true;
+      } catch (e) {}
+    }
+
+    /* The <style> is left in place: without the class it matches nothing. */
+    function hideLoader() {
+      if (!loaderOn || redirecting) return;
+      loaderOn = false;
+      try {
+        setLoaderClass(false);
+      } catch (e) {}
+      debug("page shown");
     }
 
     // `/thanks/` and `/thanks` are the same page; thanks1, thx-claude are not.
@@ -5363,6 +5451,7 @@ document.addEventListener("DOMContentLoaded", function () {
     var step = 0;
     function next() {
       if (step >= SCHEDULE.length) {
+        hideLoader();
         debug("no refusal within the schedule, staying on /thanks");
         return;
       }
@@ -5370,20 +5459,35 @@ document.addEventListener("DOMContentLoaded", function () {
       step += 1;
       setTimeout(function () {
         ask(function (code, body) {
-          // No answer at all (network, adblock, timeout) is worth a retry.
-          var verdict = code === 0 ? "wait" : decide(code, body);
-          debug("answer", { code: code, body: body, verdict: verdict });
-          if (verdict === "go") {
-            try {
-              sessionStorage.setItem(doneKey, "1");
-            } catch (e) {}
-            loc.replace(targetUrl(record));
-            return;
+          try {
+            // No answer at all (network, adblock, timeout) is worth a retry.
+            var verdict = code === 0 ? "wait" : decide(code, body);
+            debug("answer", { code: code, body: body, verdict: verdict });
+            if (verdict === "go") {
+              redirecting = true;
+              try {
+                sessionStorage.setItem(doneKey, "1");
+              } catch (e) {}
+              loc.replace(targetUrl(record));
+              return;
+            }
+            if (verdict === "wait") {
+              next();
+              return;
+            }
+            hideLoader();
+          } catch (e) {
+            hideLoader();
           }
-          if (verdict === "wait") next();
         });
       }, delay);
     }
+
+    showLoader();
+    /* The ceiling is armed before the first request on purpose: a blocked
+       fetch, a request that never answers or an exception must not be able to
+       leave the customer looking at a white screen. */
+    setTimeout(hideLoader, LOADER_MAX_MS);
     next();
   } catch (e) {}
 })();
