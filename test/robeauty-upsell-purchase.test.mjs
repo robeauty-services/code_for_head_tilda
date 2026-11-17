@@ -177,7 +177,7 @@ test("upsell on /thanks: an Upsell event, no Purchase, nothing pending", () => {
   assert.equal(r.tiktok[0].opts.server, false, "no relay copy for the upsell");
 });
 
-test("upsell does not overwrite a main order still waiting for its payment check", () => {
+test("card upsell waits for its payment and leaves a waiting main order alone", () => {
   const waiting = JSON.stringify({ orderId: MAIN_ORDER, eventId: MAIN_ORDER + "_purchase", payment: "wayforpay", ts: 1 });
   const r = load({
     path: "/thanks",
@@ -186,7 +186,62 @@ test("upsell does not overwrite a main order still waiting for its payment check
   });
   submit(r, cartForm("form2235408313", "wayforpay"));
   assert.equal(r.storage.get("rb_meta_pending"), waiting);
-  assert.equal(r.pixel.find((c) => c[0] === "trackCustom")[2].payment, "wayforpay");
+  assert.equal(r.pixel.filter((c) => c[0] === "trackCustom").length, 0, "nothing before the payment");
+  assert.equal(r.tiktok.length, 0);
+  const rec = JSON.parse(r.storage.get("rb_upsell_pending"));
+  assert.equal(rec.orderId, UPSELL_ORDER);
+  assert.equal(rec.eventId, UPSELL_ORDER + "_upsell");
+  assert.equal(rec.meta.value, 499);
+});
+
+/* Back on /thanks after paying: section 9's gate decides. */
+const NOW = Date.now();
+const cardUpsellRecord = (ts = NOW) =>
+  JSON.stringify({
+    orderId: UPSELL_ORDER,
+    eventId: UPSELL_ORDER + "_upsell",
+    payment: "wayforpay",
+    ts,
+    meta: { value: 499, currency: "UAH", payment: "wayforpay" },
+    tiktok: { contents: [], value: 499, currency: "UAH" },
+    user: { phone: "+380 (11) 111-11-01" },
+  });
+const withGate = (r, answer) => {
+  const asked = [];
+  r.ctx.rbPaidGate = {
+    whenPaid: (id, cb) => {
+      asked.push(id);
+      if (answer === "paid") cb("paid");
+    },
+    isExpired: (ts) => typeof ts === "number" && NOW - ts > 24 * 3600 * 1000,
+  };
+  for (const cb of r.listeners.DOMContentLoaded || []) cb();
+  return asked;
+};
+
+test("card upsell: Upsell once the gate confirms the payment", () => {
+  const r = load({ path: "/thanks", store: { rb_upsell_pending: cardUpsellRecord() } });
+  const asked = withGate(r, "paid");
+  assert.deepEqual([...asked], [UPSELL_ORDER]);
+  const custom = r.pixel.filter((c) => c[0] === "trackCustom" && c[1] === "Upsell");
+  assert.equal(custom.length, 1);
+  assert.equal(custom[0][3].eventID, UPSELL_ORDER + "_upsell");
+  assert.equal(r.tiktok.filter((t) => t.event === "Upsell").length, 1);
+  assert.equal(purchases(r).length, 0);
+  assert.equal(r.storage.has("rb_upsell_pending"), false);
+});
+
+test("card upsell: unpaid stays waiting, expired is dropped, both silent", () => {
+  let r = load({ path: "/thanks", store: { rb_upsell_pending: cardUpsellRecord() } });
+  withGate(r, "unpaid");
+  assert.equal(r.pixel.filter((c) => c[0] === "trackCustom").length, 0);
+  assert.ok(r.storage.has("rb_upsell_pending"));
+
+  r = load({ path: "/thanks", store: { rb_upsell_pending: cardUpsellRecord(NOW - 25 * 3600 * 1000) } });
+  const asked = withGate(r, "paid");
+  assert.equal(asked.length, 0);
+  assert.equal(r.pixel.filter((c) => c[0] === "trackCustom").length, 0);
+  assert.equal(r.storage.has("rb_upsell_pending"), false);
 });
 
 test("any cart order on a thanks page is the upsell, even if the form id changes", () => {
@@ -196,6 +251,17 @@ test("any cart order on a thanks page is the upsell, even if the form id changes
     assert.equal(r.storage.has("rb_meta_pending"), false, path);
     assert.equal(r.pixel.filter((c) => c[1] === "Upsell").length, 1, path);
   }
+});
+
+test("the main cart is always an order, even on a thanks page (/thx-claude footer)", () => {
+  const r = load({
+    path: "/thx-claude",
+    store: { tcart: JSON.stringify(promoCart()) },
+    dataLayer: [{ ecommerce: { purchase: { actionField: { id: MAIN_ORDER } } } }],
+  });
+  submit(r, cartForm("form665507684"));
+  assert.equal(JSON.parse(r.storage.get("rb_meta_pending")).eventId, MAIN_ORDER + "_purchase");
+  assert.equal(r.pixel.filter((c) => c[1] === "Upsell").length, 0);
 });
 
 test("main cart order: one pending Purchase, value after the promo code", () => {
@@ -276,6 +342,8 @@ test("cash order on /thanks: pixel, server and TikTok get one Purchase with the 
   assert.equal(server[0].body.event_id, MAIN_ORDER + "_purchase");
   // fb_capi_service takes value from cart.prodamount: it gets the same 1800.
   assert.equal(server[0].body.cart.prodamount, 1800);
+  // …and its fallback for a 0 value is cart.amount: the same number there.
+  assert.equal(server[0].body.cart.amount, 1800);
   assert.equal(server[0].body.cart.products.length, 2, "the lines go as they were");
 
   const tt = r.tiktok.filter((t) => t.event === "Purchase");
