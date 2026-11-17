@@ -445,6 +445,33 @@ document.addEventListener("DOMContentLoaded", function () {
     return null;
   };
 
+  // Сума товарів, яку покупець справді платить: після промокоду, бонусів
+  // (секція 10 кладе їх у той самий слот промокоду) і автознижок магазину,
+  // без доставки. Раніше бралась `prodamount` — повні ціни, і Purchase
+  // у Meta й TikTok ішов на суму до знижки (у листопаді 2026 — на 1,85 %
+  // більше, ніж у Kommo). Поля рахує сама Тільда (tilda-cart-1.1):
+  //   prodamount_withdyndiscount — після автознижок магазину;
+  //   prodamount_withdiscount    — після промокоду, поверх автознижок; Тільда
+  //                                стирає його, коли промокод знято, тож без
+  //                                `promocode` це залишок і він не береться.
+  // Значення поза 0…prodamount — помилка, тоді лишається prodamount.
+  var cartGoodsValue = (cartObj) => {
+    var full = Number(cartObj && cartObj.prodamount) || 0;
+    var pick = (v) => {
+      if (v === null || v === undefined || v === "") return null;
+      var n = Number(v);
+      return isFinite(n) && n >= 0 && n <= full + 0.01 ? n : null;
+    };
+    if (!cartObj || !(full > 0)) return full;
+    var promo =
+      cartObj.promocode && typeof cartObj.promocode === "object"
+        ? pick(cartObj.prodamount_withdiscount)
+        : null;
+    if (promo !== null) return promo;
+    var dyn = pick(cartObj.prodamount_withdyndiscount);
+    return dyn !== null ? dyn : full;
+  };
+
   // Единый парсер корзины Тильды (устраняет дублирование кода для IC и Purchase)
   var parseTildaCartData = (cartObj) => {
     var result = {
@@ -452,13 +479,17 @@ document.addEventListener("DOMContentLoaded", function () {
       contents: [],
       ga_items: [],
       num_items: 0,
-      value: Number(cartObj.prodamount) || 0,
+      value: cartGoodsValue(cartObj),
       currency: "UAH",
     };
     if (!cartObj || !cartObj.products) return result;
 
     cartObj.products.forEach((elem) => {
-      if (elem.name === "empty" || elem.id === "delivery" || !elem.name) return;
+      if (!elem || elem.name === "empty" || elem.id === "delivery" || !elem.name)
+        return;
+      // Видалений з кошика товар Тільда не прибирає, а позначає
+      // deleted: "yes" до наступної ініціалізації кошика; у суми він не йде.
+      if (elem.deleted === "yes") return;
 
       var id = elem.uid;
       if (!id) {
@@ -493,6 +524,124 @@ document.addEventListener("DOMContentLoaded", function () {
       }
     });
     return result;
+  };
+
+  // --- ДОПРОДАЖ НА /thanks: НЕ НОВА ПОКУПКА ---
+  // На сторінці «дякуємо» стоїть окремий кошик Тільди (форма 2235408313),
+  // і блок допродажу сам відправляє його. Тільда робить з цього окреме
+  // замовлення з власним номером, а Kommo — сделку «Допродаж | …», яку
+  // Авто ТТН зливає в основне замовлення й закриває 143. Покупка одна.
+  // До 1.0.37 обробник нижче клав допродаж у rb_meta_pending, як звичайне
+  // замовлення, і Meta та TikTok отримували другий Purchase з власним
+  // event_id: 5–17.11.2026 — 1 716 допродажів на 14 394 замовлення (+11,9 %
+  // покупок у кабінетах, так само в Meta і TikTok).
+  // Тепер допродаж іде власною подією «Upsell» (Meta — trackCustom, TikTok —
+  // нестандартна подія) лише з браузера: оптимізацію на покупку вона не
+  // чіпає, а в Events Manager видно кількість і суму. Без серверної копії:
+  // ретранслятор TikTok і сервер Meta приймають лише відомі події, а
+  // оптимізувати на неї ніхто не буде. rb_meta_pending не чіпаємо: там може
+  // чекати на підтвердження оплати основне замовлення.
+  // Наложка — подія одразу. Картка — як і покупка (секція 9): запис
+  // rb_upsell_pending і подія лише після того, як бекенд підтвердив оплату,
+  // інакше неоплачені допродажі завищували б саме ту суму, заради якої подія.
+  // Ознака допродажу — форма кошика допродажу, або будь-який кошик на
+  // сторінці «дякуємо» (/thanks…, /thx-claude…, як у секції 5), крім основного
+  // кошика form665507684: він буває й там (підвал /thx-claude), і його
+  // замовлення — завжди замовлення.
+  var UPSELL_FORM_ID = "form2235408313";
+  var MAIN_CART_FORM_ID = "form665507684";
+  var UPSELL_PENDING_KEY = "rb_upsell_pending";
+  var isThanksUpsellOrder = (formId, pathname) => {
+    var id = String(formId || "");
+    if (id === MAIN_CART_FORM_ID) return false;
+    if (id === UPSELL_FORM_ID) return true;
+    var p = String(pathname || "").toLowerCase();
+    return p.indexOf("/thanks") !== -1 || p.indexOf("/thx-claude") !== -1;
+  };
+
+  var fireUpsell = (rec) => {
+    dispatchEvent("trackCustom", "Upsell", rec.meta, { eventID: rec.eventId });
+    sendToTikTok("Upsell", rec.tiktok, {
+      eventId: rec.eventId,
+      user: rec.user,
+      server: false,
+    });
+  };
+
+  var sendUpsellEvents = (cart, orderKey, phoneInput, form) => {
+    try {
+      var parsed = parseTildaCartData(cart || {});
+      var field = (sel) =>
+        (form && form.querySelector && form.querySelector(sel)?.value) || "";
+      var payment = String(field('[name="paymentsystem"]:checked')).toLowerCase();
+      var rec = {
+        orderId: String(orderKey),
+        eventId: String(orderKey) + "_upsell",
+        payment: payment,
+        ts: Date.now(),
+        meta: {
+          content_type: "product",
+          content_ids: parsed.content_ids,
+          contents: parsed.contents,
+          value: parsed.value,
+          currency: parsed.currency,
+          num_items: parsed.num_items,
+          payment: payment,
+        },
+        tiktok: {
+          contents: tikTokContents(parsed),
+          value: parsed.value,
+          currency: parsed.currency,
+        },
+        user: {
+          email: field("[type=email]"),
+          phone: phoneInput,
+          external_id: getExternalId(phoneInput),
+        },
+      };
+      if (!payment || payment === "cash") return fireUpsell(rec);
+      localStorage.setItem(UPSELL_PENDING_KEY, JSON.stringify(rec));
+    } catch (error) {
+      console.error("[Upsell event error]", error);
+    }
+  };
+
+  /* Допродаж карткою: подія після підтвердженої оплати. Викликається на
+     кожній сторінці (DOMContentLoaded): на «дякуємо» rbPaidGate питає бекенд
+     5 хвилин, деінде — один раз. Без секції 9 — лише на «дякуємо», як і
+     покупка. Протухлий запис (секція 9: 24 год) — прибираємо мовчки. */
+  var fireUpsellWhenPaid = (onThanksPage) => {
+    var raw = null;
+    try {
+      raw = localStorage.getItem(UPSELL_PENDING_KEY);
+    } catch (e) {
+      return;
+    }
+    if (!raw) return;
+    var rec = null;
+    try {
+      rec = JSON.parse(raw);
+    } catch (e) {}
+    var drop = () => {
+      try {
+        localStorage.removeItem(UPSELL_PENDING_KEY);
+      } catch (e) {}
+    };
+    if (!rec || !rec.eventId) return drop();
+    var gate = window.rbPaidGate;
+    if (gate && gate.isExpired(rec.ts)) return drop();
+    var fire = () => {
+      // Інша вкладка могла вже відправити цей допродаж.
+      if (localStorage.getItem(UPSELL_PENDING_KEY) !== raw) return;
+      drop();
+      try {
+        fireUpsell(rec);
+      } catch (error) {
+        console.error("[Upsell event error]", error);
+      }
+    };
+    if (gate) gate.whenPaid(rec.orderId, fire);
+    else if (onThanksPage) fire();
   };
 
   // --- GOOGLE ХЕЛПЕР ---
@@ -1355,7 +1504,18 @@ document.addEventListener("DOMContentLoaded", function () {
             fbp: data.fbp,
             client_user_agent: data.client_user_agent,
           },
-          cart: data.cart,
+          // Сервер (fb_capi_service, tildaMapper) бере value з `prodamount`
+          // (нуль — з `amount`), а contents — з усіх рядків кошика. Даємо йому
+          // ту саму суму після знижок і ті самі рядки (без видалених), що й
+          // пікселю, — інакше браузерна й серверна копії однієї покупки
+          // розходились би.
+          cart: Object.assign({}, data.cart, {
+            prodamount: parsedCart.value,
+            amount: parsedCart.value,
+            products: ((data.cart && data.cart.products) || []).filter(
+              (p) => !(p && p.deleted === "yes"),
+            ),
+          }),
         });
 
         sendToTikTok(
@@ -1443,6 +1603,9 @@ document.addEventListener("DOMContentLoaded", function () {
         });
       }
     }
+
+    // Допродаж карткою чекає підтвердженої оплати так само (див. вище).
+    fireUpsellWhenPaid(onThanksPage);
   });
 
   // =========================================================================
@@ -1456,7 +1619,17 @@ document.addEventListener("DOMContentLoaded", function () {
     // А. ЛОГИКА PURCHASE (Сохранение корзины)
     if (form.closest(".t706__orderform")) {
       try {
-        var cart = JSON.parse(localStorage.getItem("tcart") || "{}");
+        // Живий кошик сторінки, а не його копія в localStorage: Тільда
+        // зберігає копію не після кожної зміни. Промокод із посилання ?promo=
+        // (підвал rec976910646) живе лише в пам'яті — 17.11.2026 на живому
+        // сайті window.tcart показував 1 901 ₴ з кодом CART5, а localStorage
+        // 2 001 ₴ без коду. aftersuccess Тільда шле до successEnd, який чистить
+        // кошик, тож товари тут ще на місці; копія — бо successEnd його зітре.
+        var liveCart = window.tcart;
+        var cart =
+          liveCart && Array.isArray(liveCart.products) && liveCart.products.length
+            ? JSON.parse(JSON.stringify(liveCart))
+            : JSON.parse(localStorage.getItem("tcart") || "{}");
 
         // Ищем ID транзакции в DataLayer
         var dl = window.dataLayer || [];
@@ -1474,10 +1647,18 @@ document.addEventListener("DOMContentLoaded", function () {
           window.crypto && crypto.randomUUID
             ? crypto.randomUUID()
             : String(Date.now());
-        var eventId =
-          (txId ? String(txId) : cart.orderid || fallbackUuid) + "_purchase";
+        var orderKey = txId ? String(txId) : cart.orderid || fallbackUuid;
 
         var phoneInput = form.querySelector("[type=tel]")?.value || "";
+
+        if (isThanksUpsellOrder(form.id, window.location.pathname)) {
+          sendUpsellEvents(cart, orderKey, phoneInput, form);
+          // Попытка оформления закончилась (см. ниже).
+          localStorage.removeItem("fb_capi_initial_checkout");
+          return;
+        }
+
+        var eventId = orderKey + "_purchase";
 
         var dataObj = {
           cart,
