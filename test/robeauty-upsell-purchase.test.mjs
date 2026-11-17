@@ -1,9 +1,10 @@
 /* Section 3 of src/head.js: what an order sends to Meta and TikTok.
  *
  *   upsell on /thanks -> its own "Upsell" event (Meta trackCustom, TikTok
- *                        custom), browser only; never a Purchase and never
- *                        written to rb_meta_pending, so a main order waiting
- *                        there for its payment check is left alone
+ *                        custom), browser only, sent on the next page load
+ *                        (cash at once, card once paid); never a Purchase and
+ *                        never written to rb_meta_pending, so a main order
+ *                        waiting there for its payment check is left alone
  *   main order        -> rb_meta_pending, then on /thanks one Purchase to the
  *                        pixel, the server copy and TikTok, all with the same
  *                        event_id and the same value: goods after the promo
@@ -150,7 +151,7 @@ const submit = (r, form) => {
 };
 const purchases = (r) => r.pixel.filter((c) => c[0] === "track" && c[1] === "Purchase");
 
-test("upsell on /thanks: an Upsell event, no Purchase, nothing pending", () => {
+test("upsell on /thanks: no Purchase, nothing in rb_meta_pending, Upsell on the next page", () => {
   const r = load({
     path: "/thanks",
     store: { tcart: JSON.stringify(upsellCart()), fb_capi_initial_checkout: "1" },
@@ -162,19 +163,28 @@ test("upsell on /thanks: an Upsell event, no Purchase, nothing pending", () => {
   assert.equal(r.storage.has("fb_capi_initial_checkout"), false);
   assert.equal(purchases(r).length, 0);
   assert.equal(r.requests.filter((q) => q.endpoint === "purchase").length, 0);
+  // Tilda leaves the page right after this event: nothing is sent yet.
+  assert.equal(r.pixel.filter((c) => c[0] === "trackCustom").length, 0);
+  assert.equal(r.tiktok.length, 0);
+  const rec = r.storage.get("rb_upsell_pending");
+  assert.ok(rec);
 
-  const custom = r.pixel.filter((c) => c[0] === "trackCustom");
+  // The next page (/thanks again for cash): the Upsell goes, no gate needed.
+  const next = load({ path: "/thanks", store: { rb_upsell_pending: rec } });
+  for (const cb of next.listeners.DOMContentLoaded || []) cb();
+  const custom = next.pixel.filter((c) => c[0] === "trackCustom");
   assert.equal(custom.length, 1);
   assert.equal(custom[0][1], "Upsell");
   assert.equal(custom[0][2].value, 499);
   assert.equal(custom[0][2].payment, "cash");
   assert.equal(custom[0][3].eventID, UPSELL_ORDER + "_upsell");
-
-  assert.equal(r.tiktok.length, 1);
-  assert.equal(r.tiktok[0].event, "Upsell");
-  assert.equal(r.tiktok[0].data.value, 499);
-  assert.equal(r.tiktok[0].opts.eventId, UPSELL_ORDER + "_upsell");
-  assert.equal(r.tiktok[0].opts.server, false, "no relay copy for the upsell");
+  assert.equal(next.tiktok.length, 1);
+  assert.equal(next.tiktok[0].event, "Upsell");
+  assert.equal(next.tiktok[0].data.value, 499);
+  assert.equal(next.tiktok[0].opts.eventId, UPSELL_ORDER + "_upsell");
+  assert.equal(next.tiktok[0].opts.server, false, "no relay copy for the upsell");
+  assert.equal(purchases(next).length, 0);
+  assert.equal(next.storage.has("rb_upsell_pending"), false, "sent once");
 });
 
 test("card upsell waits for its payment and leaves a waiting main order alone", () => {
@@ -249,7 +259,7 @@ test("any cart order on a thanks page is the upsell, even if the form id changes
     const r = load({ path, store: { tcart: JSON.stringify(upsellCart()) } });
     submit(r, cartForm("form9999999999"));
     assert.equal(r.storage.has("rb_meta_pending"), false, path);
-    assert.equal(r.pixel.filter((c) => c[1] === "Upsell").length, 1, path);
+    assert.ok(r.storage.has("rb_upsell_pending"), path);
   }
 });
 
@@ -261,7 +271,7 @@ test("the main cart is always an order, even on a thanks page (/thx-claude foote
   });
   submit(r, cartForm("form665507684"));
   assert.equal(JSON.parse(r.storage.get("rb_meta_pending")).eventId, MAIN_ORDER + "_purchase");
-  assert.equal(r.pixel.filter((c) => c[1] === "Upsell").length, 0);
+  assert.equal(r.storage.has("rb_upsell_pending"), false);
 });
 
 test("main cart order: one pending Purchase, value after the promo code", () => {
