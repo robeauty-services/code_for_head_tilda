@@ -541,9 +541,13 @@ document.addEventListener("DOMContentLoaded", function () {
   // ретранслятор TikTok і сервер Meta приймають лише відомі події, а
   // оптимізувати на неї ніхто не буде. rb_meta_pending не чіпаємо: там може
   // чекати на підтвердження оплати основне замовлення.
-  // Наложка — подія одразу. Картка — як і покупка (секція 9): запис
-  // rb_upsell_pending і подія лише після того, як бекенд підтвердив оплату,
-  // інакше неоплачені допродажі завищували б саме ту суму, заради якої подія.
+  // Подія — як і покупка — не в мить відправки форми, а на наступній
+  // сторінці: Тільда одразу після aftersuccess переходить на /thanks чи на
+  // оплату, і запит пікселя не встигав піти (1.0.37: на живому /thanks код
+  // кликав trackCustom, а в статистиці Meta «Upsell» не з'явився). Тому
+  // запис rb_upsell_pending, а на наступному завантаженні: наложка — одразу,
+  // картка — лише після того, як бекенд підтвердив оплату (секція 9), інакше
+  // неоплачені допродажі завищували б саме ту суму, заради якої подія.
   // Ознака допродажу — форма кошика допродажу, або будь-який кошик на
   // сторінці «дякуємо» (/thanks…, /thx-claude…, як у секції 5), крім основного
   // кошика form665507684: він буває й там (підвал /thx-claude), і його
@@ -599,17 +603,22 @@ document.addEventListener("DOMContentLoaded", function () {
           external_id: getExternalId(phoneInput),
         },
       };
-      if (!payment || payment === "cash") return fireUpsell(rec);
-      localStorage.setItem(UPSELL_PENDING_KEY, JSON.stringify(rec));
+      try {
+        localStorage.setItem(UPSELL_PENDING_KEY, JSON.stringify(rec));
+      } catch (e) {
+        // Без сховища — хоча б спроба одразу (наложка), як було в 1.0.37.
+        if (!payment || payment === "cash") fireUpsell(rec);
+      }
     } catch (error) {
       console.error("[Upsell event error]", error);
     }
   };
 
-  /* Допродаж карткою: подія після підтвердженої оплати. Викликається на
-     кожній сторінці (DOMContentLoaded): на «дякуємо» rbPaidGate питає бекенд
-     5 хвилин, деінде — один раз. Без секції 9 — лише на «дякуємо», як і
-     покупка. Протухлий запис (секція 9: 24 год) — прибираємо мовчки. */
+  /* Відкладений допродаж. Викликається на кожній сторінці (DOMContentLoaded).
+     Наложка — подія одразу. Картка — після підтвердженої оплати: на «дякуємо»
+     rbPaidGate питає бекенд 5 хвилин, деінде — один раз; без секції 9 — лише
+     на «дякуємо», як і покупка. Протухлий запис (секція 9: 24 год) —
+     прибираємо мовчки. */
   var fireUpsellWhenPaid = (onThanksPage) => {
     var raw = null;
     try {
@@ -640,7 +649,8 @@ document.addEventListener("DOMContentLoaded", function () {
         console.error("[Upsell event error]", error);
       }
     };
-    if (gate) gate.whenPaid(rec.orderId, fire);
+    if (!rec.payment || rec.payment === "cash") fire();
+    else if (gate) gate.whenPaid(rec.orderId, fire);
     else if (onThanksPage) fire();
   };
 
@@ -1604,7 +1614,7 @@ document.addEventListener("DOMContentLoaded", function () {
       }
     }
 
-    // Допродаж карткою чекає підтвердженої оплати так само (див. вище).
+    // Відкладений допродаж (наложка — одразу, картка — після оплати).
     fireUpsellWhenPaid(onThanksPage);
   });
 
