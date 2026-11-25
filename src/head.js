@@ -4744,6 +4744,8 @@ document.addEventListener("DOMContentLoaded", function () {
       ["address", "address"],
       ["call_option", "CallOption"],
       ["payment_system", "paymentsystem"],
+      // The A/B group of section 16; absent outside the test.
+      ["ab_variant", "ab_variant"],
     ];
     // The rest of `details`, taken from the cart object.
     var CART_DETAIL_KEYS = ["promocode", "delivery", "total"];
@@ -5933,6 +5935,359 @@ document.addEventListener("DOMContentLoaded", function () {
       document.addEventListener("DOMContentLoaded", onReady);
     } else {
       onReady();
+    }
+  } catch (e) {}
+})();
+
+/* ===================== 16. Card payment incentive A/B ===================== */
+/* A/B "+50 ₴ in bonuses for paying by card" in the main cart (Vlad, CRO,
+   19.11.2026). Two groups from the GrowthBook feature `card_pay_incentive`:
+   `control` — the cart as it is; `bonus_50` — the card option reads
+   "Карткою онлайн / +50 ₴ бонусами", a note under the payment block says when
+   the bonus is credited, and a line under the cashback row shows it while the
+   card is the chosen payment. The default payment method, the total, the
+   button and the order of the blocks are not touched, and nothing is removed.
+
+   The group is read from GrowthBook only while the main cart is open, so
+   GrowthBook's `experiment_viewed` (the trackingCallback in the site head)
+   counts cart openers and not every visitor. The split is by `gbuuid`, so a
+   returning visitor keeps her group. A feature GrowthBook does not know —
+   before the launch, after the feature is archived, or when its CDN is
+   blocked — means no group: the cart stays as it is and no field is written.
+
+   In both groups the group goes into a hidden `ab_variant` field of the main
+   cart form, the same way as `visited_pages` (section 6), so Tilda carries it
+   into the Kommo deal (field AB_VARIANT) and into our webhook. kommo-service
+   credits the 50 ₴ from that field once the deal is won. Section 12 sends the
+   same field with the cart snapshot.
+
+   On /thanks, after a card order of the `bonus_50` group, a line above the
+   upsell block says the bonus comes after the parcel is received. "A card
+   order" is the record section 12 wrote at submit (`localStorage.rb_pay_link`,
+   removed by a newer order paid on delivery); a refused card never gets to
+   read it, because section 14 moves that customer to /payment-result.
+
+   By hand: `?rbpay=bonus_50` or `?rbpay=control` holds a group until the tab
+   is closed, without asking GrowthBook; `?rbpay=reset` lets go of it.
+
+   Off switches: stop the experiment or archive the feature in GrowthBook (no
+   release needed); `window.RB_CARD_BONUS_OFF = true` in the page code before
+   the cart opens; or repin the bundle to @robeauty-v1.0.38. */
+(function () {
+  try {
+    var FEATURE = "card_pay_incentive";
+    var VARIANT_A = "control";
+    var VARIANT_B = "bonus_50";
+    var FIELD = "ab_variant";
+    // Only the main cart: the upsell cart on /thanks is a separate order.
+    var MAIN_CART_FORM_ID = "form665507684";
+    var PREVIEW_PARAM = "rbpay";
+    var PREVIEW_KEY = "rb_pay_preview";
+    var GROUP_KEY = "rb_pay_ab";
+    var PAY_LINK_KEY = "rb_pay_link";
+    var CARD_VALUE = "wayforpay";
+    var THANKS_PATH = "/thanks";
+    // A card order older than this is not the one she has just paid for.
+    var THANKS_FRESH_MS = 2 * 60 * 60 * 1000;
+    var ROOT_CLASS = "rb-pay-b";
+    var STYLE_ID = "rb-pay-b-css";
+    var TEXT = {
+      labelTop: "Карткою онлайн",
+      labelBonus: "+50 ₴ бонусами",
+      note: "Бонус нарахуємо на бонусний рахунок після отримання замовлення.",
+      line: "+50 ₴ бонусами за оплату карткою онлайн",
+      thanks: "+50 ₴ бонусами нарахуємо після отримання посилки",
+    };
+    var CSS =
+      ".rb-pay-b .t706 .paylabel .rb-pay-b__bonus{display:block;font-weight:700;" +
+      "color:#1a1a1a;white-space:nowrap}" +
+      ".rb-pay-b .t706 .rb-pay-b__note{font-size:11px;line-height:1.35;" +
+      "color:#6a6a6a;margin:6px 2px 0}" +
+      ".rb-pay-b .t706 .rb-pay-b__line{font-size:12px;line-height:1.4;" +
+      "color:#1a1a1a;font-weight:700;margin-top:4px}" +
+      ".rb-pay-b .t706 .rb-pay-b__line[hidden]{display:none}" +
+      ".rb-pay-b__thanks{box-sizing:border-box;width:calc(100% - 32px);" +
+      "max-width:560px;margin:12px auto 0;padding:10px 14px;" +
+      "border-radius:12px;background:#f4f4f4;color:#1a1a1a;text-align:center;" +
+      "font:700 13px/1.4 'CenturyGothic',Arial,sans-serif}";
+
+    function debug(msg, data) {
+      if (window.RB_CARD_BONUS_DEBUG !== true) return;
+      if (window.console && console.debug) {
+        console.debug("[rb-pay-ab]", msg, data);
+      }
+    }
+
+    function isVariant(value) {
+      return value === VARIANT_A || value === VARIANT_B;
+    }
+
+    /* The group held by hand, or null. `?rbpay=` wins over what the tab holds;
+       an unknown value changes nothing. */
+    function previewVariant(search, storage) {
+      var held = null;
+      try {
+        var m = String(search || "").match(/[?&]rbpay=([^&#]*)/);
+        var asked = m ? decodeURIComponent(m[1]) : null;
+        if (asked === "reset") storage.removeItem(PREVIEW_KEY);
+        else if (isVariant(asked)) storage.setItem(PREVIEW_KEY, asked);
+        held = storage.getItem(PREVIEW_KEY);
+      } catch (e) {}
+      return isVariant(held) ? held : null;
+    }
+
+    /* What GrowthBook says, or null while it has no such feature (not loaded
+       yet, not created, archived) or the value is not one of the two groups.
+       `evalFeature` is also what makes GrowthBook report the exposure. */
+    function featureVariant(gb) {
+      if (!gb || typeof gb.evalFeature !== "function") return null;
+      var result = gb.evalFeature(FEATURE);
+      if (!result || result.source === "unknownFeature") return null;
+      return isVariant(result.value) ? result.value : null;
+    }
+
+    // "+50 ₴ …" is promised for the card only, so the line follows the choice.
+    function lineShown(variant, paymentValue) {
+      return variant === VARIANT_B && paymentValue === CARD_VALUE;
+    }
+
+    function parseJson(raw) {
+      try {
+        return JSON.parse(raw || "null");
+      } catch (e) {
+        return null;
+      }
+    }
+
+    /* /thanks: the group this browser was last shown, and a card order placed
+       from it a moment ago. Both records are ours (this section, section 12). */
+    function thanksLineDue(groupRaw, payLinkRaw, now) {
+      var group = parseJson(groupRaw);
+      if (!group || group.v !== 1 || group.variant !== VARIANT_B) return false;
+      var link = parseJson(payLinkRaw);
+      if (!link || link.v !== 1 || typeof link.ts !== "number") return false;
+      var age = now - link.ts;
+      if (age < 0 || age > THANKS_FRESH_MS) return false;
+      // The group must have been known when that order was placed.
+      return typeof group.ts === "number" && group.ts <= link.ts;
+    }
+
+    // The pure parts, so `npm test` can check them without a browser.
+    window.__rbCardBonus = {
+      previewVariant: previewVariant,
+      featureVariant: featureVariant,
+      lineShown: lineShown,
+      thanksLineDue: thanksLineDue,
+    };
+
+    var gbInstance = null;
+    var variant = null;
+
+    function off() {
+      return window.RB_CARD_BONUS_OFF === true;
+    }
+
+    function cartOpen() {
+      var body = document.body;
+      if (body && body.classList.contains("t706__body_cartwinshowed")) return true;
+      return !!document.querySelector(".t706__cartwin_showed");
+    }
+
+    function ensureCss() {
+      if (document.getElementById(STYLE_ID)) return;
+      var st = document.createElement("style");
+      st.id = STYLE_ID;
+      st.textContent = CSS;
+      document.head.appendChild(st);
+    }
+
+    /* Once known, the group stays for this page: the cart must not change
+       under her hands if the experiment is stopped while she is ordering. */
+    function resolveVariant() {
+      if (variant) return variant;
+      var held = null;
+      try {
+        held = previewVariant(window.location.search, sessionStorage);
+      } catch (e) {}
+      var found = held;
+      // GrowthBook is asked only with the cart open — see the header.
+      if (!found && cartOpen()) found = featureVariant(gbInstance);
+      if (!found) return null;
+      variant = found;
+      // For the /thanks line. Kept with its first date while the group is
+      // the same: /thanks asks whether it was known before the order.
+      try {
+        var stored = parseJson(localStorage.getItem(GROUP_KEY));
+        if (!stored || stored.v !== 1 || stored.variant !== variant) {
+          localStorage.setItem(
+            GROUP_KEY,
+            JSON.stringify({ v: 1, variant: variant, ts: Date.now() }),
+          );
+        }
+      } catch (e) {}
+      debug("group", { variant: variant, by: held ? "preview" : "growthbook" });
+      return variant;
+    }
+
+    function stampForm(value) {
+      var form = document.getElementById(MAIN_CART_FORM_ID);
+      if (!form) return;
+      var input = form.querySelector('input[name="' + FIELD + '"]');
+      if (!input) {
+        input = document.createElement("input");
+        input.type = "hidden";
+        input.name = FIELD;
+        form.appendChild(input);
+      }
+      if (input.value !== value) input.value = value;
+    }
+
+    /* Group B on top of whatever cart is drawn (the compact one or Tilda's
+       own). Every step checks before it writes, so a second run changes
+       nothing — which is also what stops the observer below from looping. */
+    function drawGroupB() {
+      var cart = document.querySelector(".t706");
+      if (!cart) return;
+      var card = cart.querySelector(
+        'input[name="paymentsystem"][value="' + CARD_VALUE + '"]',
+      );
+      if (!card) return;
+
+      document.documentElement.classList.add(ROOT_CLASS);
+      ensureCss();
+
+      var label = card.closest("label");
+      var wrap = label && label.parentElement;
+
+      // 1) the card option's caption; the footer block redraws it at times
+      var caption = label && label.querySelector(".paylabel");
+      if (caption && !caption.querySelector(".rb-pay-b__bonus")) {
+        caption.textContent = TEXT.labelTop + " ";
+        var bonus = document.createElement("span");
+        bonus.className = "rb-pay-b__bonus";
+        bonus.textContent = TEXT.labelBonus;
+        caption.appendChild(bonus);
+      }
+
+      // 2) the note under the payment block
+      if (wrap && !cart.querySelector(".rb-pay-b__note")) {
+        var note = document.createElement("div");
+        note.className = "rb-pay-b__note";
+        note.textContent = TEXT.note;
+        wrap.insertAdjacentElement("afterend", note);
+      }
+
+      // 3) the line under the cashback row — only while the card is chosen.
+      // The cashback row and the totals are drawn by footer blocks, sometimes
+      // after the payment block; the line moves under them once they exist.
+      var line = cart.querySelector(".rb-pay-b__line");
+      if (!line) {
+        line = document.createElement("div");
+        line.className = "rb-pay-b__line";
+        line.textContent = TEXT.line;
+      }
+      var anchor =
+        cart.querySelector(".rbc-cashback-line") ||
+        cart.querySelector(".rb-totals") ||
+        cart.querySelector(".rb-pay-b__note");
+      if (!anchor) return;
+      if (line.previousElementSibling !== anchor) {
+        anchor.insertAdjacentElement("afterend", line);
+      }
+      var hide = !lineShown(VARIANT_B, card.checked ? CARD_VALUE : "");
+      if (line.hidden !== hide) line.hidden = hide;
+    }
+
+    function tick() {
+      try {
+        if (off()) return;
+        var v = resolveVariant();
+        if (!v) return;
+        stampForm(v);
+        if (v === VARIANT_B) drawGroupB();
+      } catch (e) {
+        debug("tick failed", e);
+      }
+    }
+
+    var scheduled = false;
+    function schedule() {
+      if (scheduled) return;
+      scheduled = true;
+      setTimeout(function () {
+        scheduled = false;
+        tick();
+      }, 60);
+    }
+
+    function showThanksLine() {
+      try {
+        if (off()) return;
+        var path = String(window.location.pathname || "").replace(/\/+$/, "");
+        if (path !== THANKS_PATH) return;
+        var due = thanksLineDue(
+          localStorage.getItem(GROUP_KEY),
+          localStorage.getItem(PAY_LINK_KEY),
+          Date.now(),
+        );
+        if (!due) return;
+        var anchor = document.getElementById("rbt");
+        if (!anchor || !anchor.parentNode) return;
+        if (document.querySelector(".rb-pay-b__thanks")) return;
+        ensureCss();
+        var box = document.createElement("div");
+        box.className = "rb-pay-b__thanks";
+        box.textContent = TEXT.thanks;
+        anchor.parentNode.insertBefore(box, anchor);
+      } catch (e) {
+        debug("thanks line failed", e);
+      }
+    }
+
+    function start() {
+      showThanksLine();
+      tick();
+      document.addEventListener(
+        "change",
+        function (e) {
+          if (e.target && e.target.name === "paymentsystem") schedule();
+        },
+        true,
+      );
+      // GrowthBook loads its features after the page; this is its "ready".
+      document.addEventListener("growthbookdata", schedule);
+      try {
+        // Tilda flips a class on <body> when the cart opens or closes.
+        new MutationObserver(schedule).observe(document.body, {
+          attributes: true,
+          attributeFilter: ["class"],
+        });
+        // The cart is redrawn (products, the compact cart, the payment
+        // captions) — the group B texts go back in after each redraw.
+        var cart = document.querySelector(".t706");
+        if (cart) {
+          new MutationObserver(schedule).observe(cart, {
+            childList: true,
+            subtree: true,
+          });
+        }
+      } catch (e) {}
+      // Safety net for a redraw the observers miss; same as sections 6 and 7.
+      setInterval(tick, 1000);
+    }
+
+    // The GrowthBook bundle hands its instance to everything queued here —
+    // at once if it is already loaded, on load otherwise.
+    window.growthbook_queue = window.growthbook_queue || [];
+    window.growthbook_queue.push(function (gb) {
+      gbInstance = gb;
+      schedule();
+    });
+
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", start);
+    } else {
+      start();
     }
   } catch (e) {}
 })();
