@@ -216,7 +216,7 @@ const loadRescue = ({
     const [ok, body] = answer;
     return Promise.resolve({ ok, json: () => Promise.resolve(body) });
   };
-  vm.runInNewContext(section("15. Rescued payment", null), {
+  vm.runInNewContext(section("15. Rescued payment", "16. Card payment incentive"), {
     window, localStorage, document, fetch, console, JSON, String, Number, Object,
     parseInt, RegExp, Promise, encodeURIComponent, Date: { now: () => now },
     setInterval: (fn) => { ticks.push(fn); return ticks.length; },

@@ -266,6 +266,7 @@ test("form fields: the whitelist only, trimmed", () => {
       address: "Відділення №12",
       CallOption: "Можна без дзвінка",
       paymentsystem: "wayforpay",
+      ab_variant: "bonus_50",
       // None of these may ever be read.
       phone: "+380991112233",
       Email: "a@b.c",
@@ -281,8 +282,9 @@ test("form fields: the whitelist only, trimmed", () => {
     address: "Відділення №12",
     call_option: "Можна без дзвінка",
     payment_system: "wayforpay",
+    ab_variant: "bonus_50",
   });
-  assert.deepEqual(asked, ["name", "surname", "city", "address", "CallOption", "paymentsystem"]);
+  assert.deepEqual(asked, ["name", "surname", "city", "address", "CallOption", "paymentsystem", "ab_variant"]);
 });
 
 test("form fields: empty and missing ones are left out, a broken form gives nothing", () => {
