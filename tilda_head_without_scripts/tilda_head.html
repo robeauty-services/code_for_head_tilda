@@ -1,3 +1,227 @@
+<!-- RB: окно «An error occurred while sending the request…» кабинета Tilda Members — первым в head (07.11.2026).
+  Тот же глушитель, что тег GTM 154 и подвал rec976910646, но здесь он встаёт до скрипта кабинета: подвал и GTM
+  на медленном мобильном не успевали. Флаг общий — обёртка ставится один раз. ops/otkat/tilda-head-members-2026-11-07 --> <script>
+(function () {
+  if (window.__rbMembersAlertGuard) return;
+  window.__rbMembersAlertGuard = true;
+  var orig = window.alert;
+  var re = /(An error occurred while sending the request\.\s*Please check your internet connection\.|Произошла ошибка при передаче запроса\.\s*Пожалуйста, проверьте Ваше соединение с Интернетом\.)/;
+  window.alert = function (msg) {
+    try {
+      if (typeof msg === 'string' && re.test(msg)) {
+        try { if (typeof window.clarity === 'function') window.clarity('event', 'tilda_members_net_error'); } catch (e1) {}
+        return;
+      }
+    } catch (e2) {}
+    return orig.apply(window, arguments);
+  };
+})();
+</script>
+
+<!-- RB: порядок товарів у каталогах від відділу виробництва (08.11.2026).
+  Керування: robeauty.me/catalog-order (пароль). Конфіг: Supabase clientROBEAUTY, edge function catalog-order, таблиці catalog_order і catalog_order_parts.
+  Діє лише на /products, /early-access, /early-access-v1 (і лише на тих, що увімкнені в конфігу).
+  Каталог Тільди (T754): запит getproductslist тягне весь розділ одним запитом, скрипт сортує товари за списком артикулів
+  і сам віддає Тільді потрібну «сторінку» — кнопка «Показати ще» працює як і раніше.
+  Якщо покупець обрав сортування (ціна тощо) — нічого не чіпаємо.
+  09.11.2026 (доручення Александра): на /products список ставиться РЯДАМИ по 2 (збережені пари підряд) — ряд, у якого в Тільді
+  сховали один товар, і товари, яких немає у списку (нові), йдуть у кінець, щоб ряди вище не з'їжджали. Конфіг діє лише на paths
+  (зараз ["/products"]). Код і відкат: ~/Work/robeauty/ops/katalog-poryadok-0911/.
+  21.11.2026: окремий порядок для кожної категорії (фільтр Тільди filters[storepartuid][0]: «Набори», «Сироватки»…) — parts у конфігу.
+  Категорія без свого порядку поводиться як раніше (за загальним списком). Чіпаємо лише основний каталог (storepartuid 835858024320),
+  інші блоки магазину (напр. «Бестселери» внизу сторінки) — ні.
+  BF-каталог (#rb-grid) читає window.rbCatalogOrder у своєму sortCards. --> <script>
+(function () {
+  if (window.rbCatalogOrder) return;
+  var FN = 'https://wyumatzrvdknhrulghuo.supabase.co/functions/v1/catalog-order';
+  var CANDIDATES = ['/products', '/early-access', '/early-access-v1'];
+  var MAIN_PART = 'Всі товари', MAIN_STORE = '835858024320';
+  var path = (location.pathname.replace(/\/+$/, '') || '/').toLowerCase();
+  if (CANDIDATES.indexOf(path) < 0) return;
+
+  var main = null, parts = {}, done = false, cbs = [], preview = false, pv = null;
+  function mk(list) {
+    var r = {}; list.forEach(function (s, i) { r[String(s)] = i; });
+    return { rank: r, list: list.map(String) };
+  }
+  function finish(d) {
+    if (done) return;
+    done = true;
+    var onPath = d && (!Array.isArray(d.paths) || d.paths.indexOf(path) >= 0);
+    if (onPath && d.enabled && Array.isArray(d.skus) && d.skus.length) main = mk(d.skus);
+    if (onPath && d.parts) Object.keys(d.parts).forEach(function (k) {
+      var p = d.parts[k]; if (p && p.enabled && Array.isArray(p.skus) && p.skus.length) parts[k] = mk(p.skus);
+    });
+    if (pv && path === '/products') {
+      preview = true;
+      if (!pv.part || pv.part === MAIN_PART) main = mk(pv.skus); else parts[pv.part] = mk(pv.skus);
+    }
+    var l = cbs; cbs = [];
+    l.forEach(function (f) { try { f(); } catch (e) {} });
+  }
+  function onReady(fn) { if (done) setTimeout(fn, 0); else cbs.push(fn); }
+
+  /* Знайдені на місцях «відомі» товари переставляємо між собою за списком; невідомі (нові) лишаються на своїх позиціях */
+  function reorder(items, keyOf) {
+    if (!main || !items || !items.length) return items;
+    var rank = main.rank, slots = [], known = [];
+    for (var i = 0; i < items.length; i++) {
+      var k = keyOf(items[i]);
+      if (k != null && rank[k] !== undefined) { slots.push(i); known.push(items[i]); }
+    }
+    known.sort(function (a, b) { return rank[keyOf(a)] - rank[keyOf(b)]; });
+    var out = items.slice();
+    for (var j = 0; j < slots.length; j++) out[slots[j]] = known[j];
+    return out;
+  }
+  /* 09.11: рядами. Збережений список = ряди по 2 (пари підряд). Ряд, де обидва товари є, — на своє місце;
+     сирота (пару сховали в Тільді), дублі артикулу й товари поза списком — у кінець, у порядку Тільди: ряди вище не з'їжджають. */
+  function reorderRows(items, keyOf, cfg) {
+    if (!cfg || !items || !items.length) return items;
+    var rank = cfg.rank, skusList = cfg.list, byKey = {}, tail = [];
+    for (var i = 0; i < items.length; i++) {
+      var k = keyOf(items[i]);
+      if (k != null && rank[k] !== undefined && !byKey[k]) byKey[k] = items[i]; else tail.push(items[i]);
+    }
+    var out = [], orphans = [], lone = [];
+    for (var j = 0; j < skusList.length; j += 2) {
+      var A = byKey[skusList[j]], B = j + 1 < skusList.length ? byKey[skusList[j + 1]] : undefined;
+      if (A && B) { out.push(A, B); }
+      else if (j + 1 >= skusList.length) { if (A) lone.push(A); }   /* одиночний останній — останнім */
+      else { if (A) orphans.push(A); if (B) orphans.push(B); }
+    }
+    return out.concat(orphans, tail, lone);
+  }
+  function prodKey(p) {
+    if (!p) return null;
+    if (p.sku) return String(p.sku);
+    if (p.editions && p.editions[0] && p.editions[0].sku) return String(p.editions[0].sku);
+    return p.uid ? 'uid:' + p.uid : null;
+  }
+  /* який список діє для категорії: свій — якщо є, інакше загальний (як було до 21.11) */
+  function cfgFor(part) {
+    if (part && part !== MAIN_PART && parts[part]) return parts[part];
+    return main;
+  }
+  function anyActive() { return !!main || Object.keys(parts).length > 0; }
+
+  /* Попередній перегляд зі сторінки керування (лише в браузері менеджера, 2 години) */
+  try {
+    var pvr = JSON.parse(localStorage.getItem('rbco_preview') || 'null');
+    if (pvr && pvr.exp > Date.now() && Array.isArray(pvr.skus)) pv = pvr;
+    else if (pvr) localStorage.removeItem('rbco_preview');
+  } catch (e) {}
+
+  try {
+    fetch(FN).then(function (r) { return r.ok ? r.json() : null; })
+      .then(finish, function () { finish(null); });
+  } catch (e) { finish(null); }
+  setTimeout(function () { finish(null); }, 1500);
+
+  window.rbCatalogOrder = {
+    onReady: onReady,
+    active: function () { return !!main; },
+    reorder: reorder,
+    prodKey: prodKey,
+    preview: function () { return preview; }
+  };
+
+  /* ---------- Каталог Тільди: перехоплення getproductslist ---------- */
+  var XP = XMLHttpRequest.prototype;
+  var XO = XP.open, XS = XP.send;
+  var RT = Object.getOwnPropertyDescriptor(XP, 'responseText');
+  var RS = Object.getOwnPropertyDescriptor(XP, 'response');
+  if (!RT || !RS || !RT.get || !RS.get) return;
+
+  XP.open = function (method, url) {
+    this.__rbco = null;
+    try {
+      var u = String(url);
+      if (u.indexOf('getproductslist') >= 0 && !(done && !anyActive())) {
+        var U = new URL(u, location.href), sp = U.searchParams, hasSort = false;
+        sp.forEach(function (v, k) { if (/^sort/i.test(k)) hasSort = true; });
+        var size = parseInt(sp.get('size'), 10), slice = parseInt(sp.get('slice') || '1', 10);
+        var part = sp.get('filters[storepartuid][0]') || MAIN_PART;
+        var store = sp.get('storepartuid');
+        if (!hasSort && store === MAIN_STORE && size > 0 && size < 500 && slice >= 1 && !(done && !cfgFor(part))) {
+          sp.set('slice', '1');
+          sp.set('size', '500');
+          this.__rbco = { size: size, slice: slice, part: part };
+          var args = Array.prototype.slice.call(arguments);
+          args[1] = U.toString();
+          return XO.apply(this, args);
+        }
+      }
+    } catch (e) { this.__rbco = null; }
+    return XO.apply(this, arguments);
+  };
+
+  XP.send = function () {
+    var x = this, args = arguments, meta = x.__rbco;
+    if (!meta) return XS.apply(x, args);
+    var cache = null;
+    function rawText() {
+      if (x.responseType === 'json') { var r = RS.get.call(x); return r == null ? '' : JSON.stringify(r); }
+      return RT.get.call(x);
+    }
+    function transformed() {
+      var raw = rawText();
+      if (x.readyState !== 4 || !raw) return raw;
+      if (cache && cache.raw === raw) return cache.out;
+      var out = raw;
+      try {
+        var j = JSON.parse(raw);
+        if (j && Array.isArray(j.products)) {
+          var cfg = cfgFor(meta.part);
+          var list = cfg ? reorderRows(j.products, prodKey, cfg) : j.products;
+          var st = (meta.slice - 1) * meta.size;
+          j.products = list.slice(st, st + meta.size);
+          j.slice = meta.slice;
+          if (st + meta.size < list.length) j.nextslice = meta.slice + 1; else delete j.nextslice;
+          out = JSON.stringify(j);
+        }
+      } catch (e) { out = raw; }
+      cache = { raw: raw, out: out };
+      return out;
+    }
+    try {
+      Object.defineProperty(x, 'responseText', { configurable: true, get: transformed });
+      Object.defineProperty(x, 'response', {
+        configurable: true,
+        get: function () {
+          var rt = x.responseType;
+          if (!rt || rt === 'text') return transformed();
+          if (rt === 'json') { try { return JSON.parse(transformed()); } catch (e) { return RS.get.call(x); } }
+          return RS.get.call(x);
+        }
+      });
+    } catch (e) {}
+    if (done) return XS.apply(x, args);
+    onReady(function () { XS.apply(x, args); });
+  };
+
+  /* Плашка попереднього перегляду */
+  if (pv && path === '/products') {
+    var showBadge = function () {
+      if (document.getElementById('rbco-preview')) return;
+      var b = document.createElement('div');
+      b.id = 'rbco-preview';
+      b.style.cssText = 'position:fixed;left:12px;bottom:12px;z-index:2147483000;background:#1c1c1c;color:#fff;font:600 13px/1.4 Manrope,system-ui,sans-serif;padding:10px 14px;border-radius:12px;box-shadow:0 4px 18px rgba(0,0,0,.25);display:flex;gap:12px;align-items:center';
+      var s = document.createElement('span');
+      s.textContent = 'Попередній перегляд порядку' + (pv.part && pv.part !== MAIN_PART ? ' · ' + pv.part : '') + ' (бачите лише ви)';
+      b.appendChild(s);
+      var a = document.createElement('a');
+      a.href = '#'; a.textContent = 'Вийти';
+      a.style.cssText = 'color:#fff;text-decoration:underline';
+      a.onclick = function (e) { e.preventDefault(); try { localStorage.removeItem('rbco_preview'); } catch (er) {} location.reload(); };
+      b.appendChild(a);
+      document.body.appendChild(b);
+    };
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', showBadge); else showBadge();
+  }
+})();
+</script>
+
 <meta
   name="facebook-domain-verification"
   content="9tgt7vdc3nlwkxpv4jdf26yu47qrwp"
